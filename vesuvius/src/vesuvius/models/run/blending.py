@@ -706,6 +706,21 @@ def merge_inference_outputs(
     print(f"  Num Classes: {num_classes}")
     print(f"  Original Volume Shape (Z,Y,X): {original_volume_shape}")
 
+    # vesuvius.predict records how many parts the run was split into. Without this check
+    # a part whose job failed leaves a slab of the volume empty in the merged result, and
+    # parts left behind by an earlier run with a different split are blended into it.
+    inference_num_parts = meta_attrs.get('num_parts')
+    if inference_num_parts is not None:
+        expected_part_ids = set(range(int(inference_num_parts)))
+        missing_part_ids = sorted(expected_part_ids - set(part_ids))
+        unexpected_part_ids = sorted(set(part_ids) - expected_part_ids)
+        if missing_part_ids or unexpected_part_ids:
+            raise FileNotFoundError(
+                f"{parent_dir} holds parts {part_ids}, but part {first_part_id} was written "
+                f"by an inference run split into {int(inference_num_parts)} parts "
+                f"(missing: {missing_part_ids}, not part of that run: {unexpected_part_ids})."
+            )
+
     # --- 3. Prepare Output Stores ---
     # When fused mode is active, populate finalize_config with multi-task metadata
     # from the logits zarr attrs and use the finalized shape/dtype.
