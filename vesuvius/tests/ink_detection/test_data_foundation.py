@@ -250,6 +250,43 @@ def test_segment_gathering_preserves_remote_and_explicit_volume_paths(tmp_path):
     ]
 
 
+def test_segment_gathering_rejects_a_listed_segment_that_is_not_on_disk(tmp_path):
+    root = tmp_path / "native9"
+    for name in ("w035", "w040"):
+        (root / name / f"{name}_inklabels.zarr").mkdir(parents=True)
+        (root / name / f"{name}_supervision_mask.zarr").mkdir()
+    listed = ["w035", "w039", "w040", "w041"]
+
+    def config(segments):
+        return InkDataConfig.from_mapping(
+            {
+                "mode": "flat",
+                "patch_size": [3, 2, 2],
+                "patch_overlap": 0.25,
+                "patch_min_labeled_coverage": 0.0,
+                "datasets": [
+                    {
+                        "segments_path": str(root),
+                        "segments": segments,
+                        "surface_volume_paths": {
+                            name: f"s3://vesuvius-challenge-open-data/{name}.zarr/"
+                            for name in segments
+                        },
+                        "volume_scale": 0,
+                    }
+                ],
+            }
+        )
+
+    with pytest.raises(FileNotFoundError, match=r"2 segment\(s\).*\['w039', 'w041'\]"):
+        gather_segments(config(listed))
+
+    assert [segment.segment_name for segment in gather_segments(config(["w035", "w040"]))] == [
+        "w035",
+        "w040",
+    ]
+
+
 def test_patch_discovery_math_and_filter_empty_tile_subtiling():
     label = np.zeros((4, 4), dtype=np.uint8)
     label[1, 1] = 1
