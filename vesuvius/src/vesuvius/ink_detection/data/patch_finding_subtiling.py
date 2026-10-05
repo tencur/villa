@@ -128,8 +128,10 @@ def find_segment_patches(
     )
     training: list[Patch] = []
     held_out: list[Patch] = []
+    # The patch window is in image coordinates; the labels sit at their own mid-plane.
+    image_surface = int(open_volume(segment.image_volume, segment.scale).shape[0] // 2)
     for x1, y1, _, _ in xyxys.tolist():
-        z0 = surface - patch_size[0] // 2
+        z0 = image_surface - patch_size[0] // 2
         bbox = (
             z0,
             int(y1),
