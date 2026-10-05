@@ -365,6 +365,67 @@ def test_folder_mode_logs_existing_prediction_and_summary(
     assert "segments_ran=0 segments_skipped=1" in caplog.text
 
 
+def _published_9um_segment(parent: Path, name: str) -> Path:
+    """A segment folder as the ink_9um label tree and docs/ink_detection.md lay it out."""
+    segment = parent / name
+    for store in (
+        f"{name}_inklabels.zarr",
+        f"{name}_supervision_mask.zarr",
+        f"{name}_validation_mask.zarr",
+        "surface-volume.zarr",
+    ):
+        (segment / store).mkdir(parents=True)
+        (segment / store / ".zgroup").touch()
+    return segment
+
+
+def test_folder_mode_resolves_the_surface_volume_beside_label_stores(
+    tmp_path, monkeypatch, caplog
+):
+    family = tmp_path / "aligned-scrollprizeorg-21slices"
+    first = _published_9um_segment(family, "pherc0139-w016")
+    second = _published_9um_segment(family, "pherc0139-w017")
+    assert resolve_segment_zarr_path(first) == first / "surface-volume.zarr"
+
+    ran = []
+    monkeypatch.setattr(
+        "vesuvius.ink_detection.inference.infer.infer_single_zarr",
+        lambda **kwargs: ran.append((kwargs["input_zarr"], kwargs["output_tiff"].parent)),
+    )
+    args = SimpleNamespace(
+        folder=family, checkpoint=Path("model.pth"), output_prefix="", direction="forward"
+    )
+    with caplog.at_level("INFO"):
+        infer_folder(args, None, device=torch.device("cpu"))
+    assert ran == [
+        (first / "surface-volume.zarr", first / "preds"),
+        (second / "surface-volume.zarr", second / "preds"),
+    ]
+    assert "segments_ran=2 segments_skipped=0" in caplog.text
+
+    # --folder may also name one such segment directory.
+    ran.clear()
+    args.folder = first
+    infer_folder(args, None, device=torch.device("cpu"))
+    assert ran == [(first / "surface-volume.zarr", first / "preds")]
+
+
+def test_folder_mode_fails_when_no_segment_can_be_resolved(tmp_path, monkeypatch):
+    for name in ("segment-a", "segment-b"):
+        for store in ("render-one.zarr", "render-two.zarr"):
+            (tmp_path / name / store).mkdir(parents=True)
+    monkeypatch.setattr(
+        "vesuvius.ink_detection.inference.infer.infer_single_zarr",
+        lambda **kwargs: pytest.fail("an ambiguous segment was run"),
+    )
+    args = SimpleNamespace(
+        folder=tmp_path, checkpoint=Path("model.pth"), output_prefix="", direction="forward"
+    )
+
+    with pytest.raises(FileNotFoundError, match="nothing was run"):
+        infer_folder(args, None, device=torch.device("cpu"))
+
+
 def test_cpu_command_checkpoint_to_tiff_timeline(tmp_path, caplog):
     config_mapping = _config_mapping(
         "vesuvius_unet_2p5d", depth=3, side=16
