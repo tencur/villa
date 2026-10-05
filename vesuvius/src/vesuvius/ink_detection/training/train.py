@@ -969,6 +969,11 @@ def _run_training(request: TrainingRequest) -> int:
                 if accelerator.is_main_process:
                     latest_val_loss = None
                     latest_ema_val_loss = None
+                    # Without a validation set there is nothing to validate, but the
+                    # train preview collected above is still due.
+                    train_preview.save(
+                        Path(train_preview_dir) / f"train_preview_{step:06}.tif"
+                    )
                 save_checkpoint(step)
                 continue
             preview_indices = set(
