@@ -423,6 +423,45 @@ def test_patch_cache_is_rejected_when_a_label_changes_under_the_same_path(tmp_pa
     assert load_patch_cache(path, config=config, segments=[segment]) is None
 
 
+def test_patch_cache_is_rejected_when_a_segment_was_added(tmp_path):
+    """A cache written for one segment must not answer for a run that has two."""
+
+    config = _config(tmp_path)
+    first = replace(
+        _segment(config, tmp_path),
+        inklabels=tmp_path / "first_ink.zarr",
+        supervision_mask=tmp_path / "first_supervision.zarr",
+    )
+    second = replace(
+        first,
+        segment_relpath="segment-b",
+        segment_dir=tmp_path / "segment-b",
+        segment_name="segment-b",
+        inklabels=tmp_path / "second_ink.zarr",
+        supervision_mask=tmp_path / "second_supervision.zarr",
+    )
+    path = tmp_path / "patches.json"
+    save_patch_cache(path, [Patch(segment=first, bbox=(1, 2, 3, 4, 5, 6))])
+
+    assert load_patch_cache(path, config=config, segments=[first]) is not None
+    assert load_patch_cache(path, config=config, segments=[first, second]) is None
+
+    save_patch_cache(
+        path,
+        [
+            Patch(segment=first, bbox=(1, 2, 3, 4, 5, 6)),
+            Patch(segment=second, bbox=(1, 2, 3, 4, 5, 6)),
+        ],
+    )
+    loaded = load_patch_cache(path, config=config, segments=[first, second])
+    assert loaded is not None and {p.segment.segment_relpath for p in loaded} == {
+        first.segment_relpath,
+        "segment-b",
+    }
+    # Dropping a segment was already rejected; keep it that way.
+    assert load_patch_cache(path, config=config, segments=[first]) is None
+
+
 def test_patch_cache_still_hits_when_nothing_changed(tmp_path):
     """The fingerprint must not cost the fast path: an untouched tree keeps hitting."""
 

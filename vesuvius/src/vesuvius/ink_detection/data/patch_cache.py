@@ -174,6 +174,7 @@ def load_patch_cache(
     }
     expected_token = patch_finding_cache_token(config)
     patches: list[Patch] = []
+    cached_segment_keys: set[tuple] = set()
     for record in records:
         if not isinstance(record, Mapping):
             raise ValueError(f"patch cache {path} contains a non-object record")
@@ -191,6 +192,7 @@ def load_patch_cache(
         segment = segments_by_key.get(key)
         if segment is None:
             return None
+        cached_segment_keys.add(key)
         bbox = tuple(int(value) for value in record["bbox"])
         if len(bbox) != 6:
             raise ValueError(f"patch cache bbox must have six ZYX bounds, got {bbox!r}")
@@ -205,4 +207,10 @@ def load_patch_cache(
                 ),
             )
         )
+    if cached_segment_keys != set(segments_by_key):
+        # Every record above matched, but a segment of this run has no record: it was
+        # added to the folder, or to the config, after the cache was written. Returning
+        # the cached patches would train on the earlier segments only. Rebuilding is
+        # the cheap side here too.
+        return None
     return patches
