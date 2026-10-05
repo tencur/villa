@@ -577,6 +577,20 @@ def reduce_partitions(
     H, W = pred_shape
     logger.info(f"Starting reduce phase: will blend {num_parts} partitions tile-by-tile (tile_size={tile_size})")
 
+    # Every partition holds the tiles of its own index range, so a partition that is
+    # absent leaves its part of the image at zero in the blended result.
+    missing = [
+        part_id
+        for part_id in range(num_parts)
+        if not os.path.exists(os.path.join(zarr_output_dir, f"mask_pred_part_{part_id:03d}.zarr"))
+        or not os.path.exists(os.path.join(zarr_output_dir, f"mask_count_part_{part_id:03d}.zarr"))
+    ]
+    if missing:
+        raise RuntimeError(
+            f"{len(missing)} of {num_parts} partitions are missing under {zarr_output_dir}: "
+            f"{missing}. Ensure all inference partitions completed before running reduce."
+        )
+
     # Cache directory for partition zarrs (network filesystem -> local /tmp)
     cache_dir = "/tmp/partition_cache"
     os.makedirs(cache_dir, exist_ok=True)
@@ -588,10 +602,6 @@ def reduce_partitions(
         """Cache and open a single partition's zarr arrays."""
         mask_pred_path = os.path.join(zarr_output_dir, f"mask_pred_part_{part_id:03d}.zarr")
         mask_count_path = os.path.join(zarr_output_dir, f"mask_count_part_{part_id:03d}.zarr")
-
-        if not os.path.exists(mask_pred_path) or not os.path.exists(mask_count_path):
-            logger.warning(f"Missing partition {part_id} at {zarr_output_dir}, skipping")
-            return None
 
         # Copy zarr directories to local cache if not already cached
         cached_pred_path = os.path.join(cache_dir, f"mask_pred_part_{part_id:03d}.zarr")
@@ -638,9 +648,7 @@ def reduce_partitions(
         # Collect results with progress bar
         with tqdm(total=num_parts, desc="Preparing partitions", unit="partition", **get_tqdm_kwargs()) as pbar:
             for future in concurrent.futures.as_completed(futures):
-                result = future.result()
-                if result is not None:
-                    partition_zarrs.append(result)
+                partition_zarrs.append(future.result())
                 pbar.update(1)
 
     logger.info(f"Successfully cached and opened {len(partition_zarrs)} partition zarr arrays")
