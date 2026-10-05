@@ -453,3 +453,65 @@ def test_real_training_entry_preserves_prepare_sync_and_ema_numerics(
     torch.testing.assert_close(checkpoint["ema_model"]["value"], torch.tensor(0.9))
     assert checkpoint["model"]["counter"].item() == 2
     assert checkpoint["ema_model"]["counter"].item() == 2
+
+
+def test_training_saves_its_final_state_when_the_run_ends_off_the_save_schedule(
+    tmp_path: Path, monkeypatch
+):
+    import vesuvius.ink_detection.data.dataset as dataset_module
+    import vesuvius.ink_detection.models.model as model_module
+    import vesuvius.ink_detection.training.losses as losses_module
+    import vesuvius.ink_detection.training.optimizers as optimizers_module
+    import vesuvius.ink_detection.training.samplers as samplers_module
+
+    authored = _training_mapping()
+    authored.update(
+        {
+            # like the shipped recipe: 78125 iterations with save_every 5000
+            "num_iterations": 5,
+            "save_every": 2,
+            "out_dir": str(tmp_path / "output"),
+            "mixed_precision": "no",
+            "dataloader_workers": 0,
+            "pin_memory": False,
+            "val_every": 99,
+            "log_every": 99,
+        }
+    )
+    authored["model_config"]["pretrained_backbone"] = "synthetic"
+    config_path = tmp_path / "training.json"
+    config_path.write_text(json.dumps(authored), encoding="utf-8")
+
+    model = _SyntheticTrainingModel()
+    monkeypatch.setattr(dataset_module, "InkDataset", _SyntheticTrainingDataset)
+    monkeypatch.setattr(model_module, "make_model", lambda config: model)
+    monkeypatch.setattr(
+        losses_module, "create_loss", lambda config: _SyntheticTrainingLoss()
+    )
+    monkeypatch.setattr(
+        optimizers_module,
+        "create_training_optimizer",
+        lambda model, config: torch.optim.SGD(model.parameters(), lr=0.1),
+    )
+    monkeypatch.setattr(
+        samplers_module,
+        "build_sampling_policy",
+        lambda patches, config, batch_size: SimpleNamespace(
+            batch_sampler=None, shuffle=False, sampler=None, generator=None, audit={}
+        ),
+    )
+    monkeypatch.setattr(
+        train_module,
+        "create_training_scheduler",
+        lambda optimizer, config: _RecordingScheduler(),
+    )
+
+    assert train_module._run_training(stage_training_request(config_path)) == 0
+
+    saved = sorted(path.name for path in (tmp_path / "output").glob("ckpt_*.pth"))
+    assert saved == ["ckpt_000002.pth", "ckpt_000004.pth", "ckpt_000005.pth"]
+    final = torch.load(
+        tmp_path / "output" / "ckpt_000005.pth", map_location="cpu", weights_only=False
+    )
+    assert final["step"] == 4
+    assert final["model"]["counter"].item() == 5

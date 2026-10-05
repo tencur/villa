@@ -1238,6 +1238,17 @@ def _run_training(request: TrainingRequest) -> int:
         ):
             write_sampling_audit(step + 1)
 
+    # The loop saves on the save_every / save_iterations schedule only. When the run
+    # does not end on that schedule, the iterations after the last scheduled save
+    # would be trained and then discarded, so write the final state as well.
+    final_step = config.num_iterations - 1
+    if final_step >= start_step and not should_save_checkpoint(
+        final_step,
+        save_every=config.save_every,
+        save_iterations=config.save_iterations,
+    ):
+        save_checkpoint(final_step, force=True)
+
     accelerator.wait_for_everyone()
     if config.benchmark.enabled:
         if accelerator.device.type == "cuda":
