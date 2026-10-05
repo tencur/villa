@@ -506,6 +506,13 @@ def _build_downsample_levels_from_zarr(
                 future.result()
 
 
+def _remove_output(path: Path) -> None:
+    if path.is_dir():
+        shutil.rmtree(path)
+    elif path.exists():
+        path.unlink()
+
+
 def convert_image(
     input_path: Path,
     *,
@@ -513,7 +520,13 @@ def convert_image(
     overwrite: bool = False,
     chunk_workers: int = 1,
 ) -> dict[str, str]:
-    """Convert one label or context image, skipping an existing output by default."""
+    """Convert one label or context image, skipping an existing output by default.
+
+    The pyramid is built under a hidden sibling name and renamed when it is
+    complete. A conversion that fails or is interrupted therefore leaves no
+    ``.zarr`` for a later run to skip, and ``overwrite`` keeps the previous
+    output until its replacement is finished.
+    """
     output_path = input_path.with_suffix(".zarr")
     if not overwrite and output_path.exists():
         return {
@@ -524,28 +537,35 @@ def convert_image(
     downsample_mode: Literal["nearest", "mean"] = (
         "mean" if is_composite_image(input_path) else "nearest"
     )
+    staged_path = output_path.with_name(f".{output_path.stem}.partial.zarr")
     streamable_metadata = _get_streamable_tiff_metadata(input_path)
-    if streamable_metadata is not None:
-        image_shape, dtype = streamable_metadata
-        datasets = _create_ome_zarr_datasets(
-            output_path,
-            image_shape=image_shape,
-            dtype=dtype,
-            levels=levels,
-            overwrite=overwrite,
-        )
-        _write_streamed_tiff_level_zero(input_path, datasets[0])
-        _build_downsample_levels_from_zarr(
-            datasets,
-            downsample_mode=downsample_mode,
-            chunk_workers=chunk_workers,
-        )
-    else:
-        image_YX = load_image(input_path)
-        pyramid = build_pyramid_with_mode(
-            image_YX, levels=levels, downsample_mode=downsample_mode
-        )
-        write_ome_zarr(pyramid, output_path, overwrite=overwrite)
+    try:
+        # overwrite=True clears a staged tree left behind by a killed run.
+        if streamable_metadata is not None:
+            image_shape, dtype = streamable_metadata
+            datasets = _create_ome_zarr_datasets(
+                staged_path,
+                image_shape=image_shape,
+                dtype=dtype,
+                levels=levels,
+                overwrite=True,
+            )
+            _write_streamed_tiff_level_zero(input_path, datasets[0])
+            _build_downsample_levels_from_zarr(
+                datasets,
+                downsample_mode=downsample_mode,
+                chunk_workers=chunk_workers,
+            )
+        else:
+            image_YX = load_image(input_path)
+            pyramid = build_pyramid_with_mode(
+                image_YX, levels=levels, downsample_mode=downsample_mode
+            )
+            write_ome_zarr(pyramid, staged_path, overwrite=True)
+        _remove_output(output_path)
+        staged_path.rename(output_path)
+    finally:
+        _remove_output(staged_path)
     return {
         "status": "written",
         "input": str(input_path),

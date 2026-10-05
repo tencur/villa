@@ -424,6 +424,79 @@ def test_label_command_rerun_counts_existing_output_as_skipped(tmp_path, capsys)
     assert "0 written, 1 skipped, 0 failed" in capsys.readouterr().out
 
 
+def _fail_while_building_levels(*args, **kwargs):
+    raise OSError(28, "No space left on device")
+
+
+def test_failed_conversion_leaves_no_output_for_the_next_run_to_skip(
+    tmp_path, monkeypatch, capsys
+):
+    label_path = tmp_path / "segment-a_inklabels.tif"
+    label_YX = np.zeros((40, 48), dtype=np.uint8)
+    label_YX[8:32, 8:40] = 255
+    tifffile.imwrite(label_path, label_YX, tile=(16, 16))
+    output = label_path.with_suffix(".zarr")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(
+            create_label_zarrs_module,
+            "_build_downsample_levels_from_zarr",
+            _fail_while_building_levels,
+        )
+        assert main([str(tmp_path), "--workers", "1", "--levels", "3"]) == 1
+    assert "0 written, 0 skipped, 1 failed" in capsys.readouterr().out
+    assert not output.exists()
+    assert [path.name for path in tmp_path.iterdir()] == [label_path.name]
+
+    assert main([str(tmp_path), "--workers", "1", "--levels", "3"]) == 0
+    assert "1 written, 0 skipped, 0 failed" in capsys.readouterr().out
+    group = zarr.open_group(output, mode="r")
+    np.testing.assert_array_equal(group["0"][DEFAULT_LABEL_SLICE], label_YX)
+    assert group["1"][:].any() and group["2"][:].any()
+
+
+def test_failed_overwrite_keeps_the_previous_output(tmp_path, monkeypatch):
+    label_path = tmp_path / "segment-a_inklabels.tif"
+    first_YX = np.full((40, 48), 7, dtype=np.uint8)
+    tifffile.imwrite(label_path, first_YX, tile=(16, 16))
+    assert convert_image(label_path, levels=2)["status"] == "written"
+    output = label_path.with_suffix(".zarr")
+
+    tifffile.imwrite(label_path, np.full((40, 48), 99, dtype=np.uint8), tile=(16, 16))
+    monkeypatch.setattr(
+        create_label_zarrs_module,
+        "_build_downsample_levels_from_zarr",
+        _fail_while_building_levels,
+    )
+    with pytest.raises(OSError):
+        convert_image(label_path, levels=2, overwrite=True)
+
+    np.testing.assert_array_equal(
+        zarr.open_group(output, mode="r")["0"][DEFAULT_LABEL_SLICE], first_YX
+    )
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
+        [label_path.name, output.name]
+    )
+
+
+def test_staged_tree_left_by_a_killed_run_is_replaced(tmp_path):
+    label_path = tmp_path / "segment-a_inklabels.tif"
+    label_YX = np.arange(35, dtype=np.uint8).reshape(5, 7)
+    tifffile.imwrite(label_path, label_YX)
+    leftover = tmp_path / ".segment-a_inklabels.partial.zarr"
+    (leftover / "0").mkdir(parents=True)
+    (leftover / "0" / "junk").write_bytes(b"half a chunk")
+
+    assert find_target_images(tmp_path) == [label_path]
+    assert convert_image(label_path, levels=2)["status"] == "written"
+
+    assert not leftover.exists()
+    np.testing.assert_array_equal(
+        zarr.open_group(label_path.with_suffix(".zarr"), mode="r")["0"][DEFAULT_LABEL_SLICE],
+        label_YX,
+    )
+
+
 def test_label_command_validates_scan_root(tmp_path):
     missing = tmp_path / "missing"
     with pytest.raises(FileNotFoundError, match="Root folder does not exist"):
