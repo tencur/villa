@@ -55,6 +55,12 @@ class BoundedPatchWriter:
 
     def __exit__(self, exc_type, exc, tb):
         self._executor.__exit__(exc_type, exc, tb)
+        # submit() only reports a failed write when another patch is submitted after it.
+        # A write that fails among the last ones (all of them, for a small region) would
+        # otherwise be logged and lost, and the run would end as if every patch had been
+        # written. All writes have finished once the executor has shut down.
+        if exc_type is None:
+            self._raise_if_failed()
         return False
 
     def submit(self, write_index, patch_data):
