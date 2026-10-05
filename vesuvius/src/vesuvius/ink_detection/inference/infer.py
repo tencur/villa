@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import math
 import shutil
@@ -1189,6 +1190,23 @@ def resolve_segment_zarr_path(segment_dir: Path) -> Path:
     )
 
 
+def checkpoint_output_label(checkpoint: Path) -> str:
+    """Name a checkpoint in output files: its stem plus a short content hash.
+
+    Different weights routinely share a file name (``step-020000.pth`` under
+    two seeds, ``ckpt_020000.pth`` again after a retrain). Folder mode skips a
+    segment that already has a prediction for this label, so the label has to
+    identify the weights and not only the file name.
+    """
+    if not checkpoint.is_file():
+        return checkpoint.stem
+    digest = hashlib.sha256()
+    with checkpoint.open("rb") as stream:
+        for block in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(block)
+    return f"{checkpoint.stem}-{digest.hexdigest()[:8]}"
+
+
 def infer_folder(
     args: argparse.Namespace,
     configured_model: ConfiguredModel,
@@ -1208,7 +1226,7 @@ def infer_folder(
             raise FileNotFoundError(f"No segment directories found under {folder}")
     else:
         segment_dirs = [folder]
-    checkpoint_stem = Path(args.checkpoint).stem
+    checkpoint_stem = checkpoint_output_label(Path(args.checkpoint))
     date = datetime.now().strftime("%d%m%y")
     prefix = f"{args.output_prefix}_" if args.output_prefix else ""
     ran_count = 0

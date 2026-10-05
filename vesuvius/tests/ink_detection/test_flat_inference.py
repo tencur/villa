@@ -365,6 +365,75 @@ def test_folder_mode_logs_existing_prediction_and_summary(
     assert "segments_ran=0 segments_skipped=1" in caplog.text
 
 
+def _folder_run(tmp_path, monkeypatch, checkpoint):
+    """Run folder mode on one segment; return the output paths it would infer."""
+    segment = tmp_path / "data" / "segment"
+    input_zarr = segment / "surface.zarr"
+    input_zarr.mkdir(parents=True, exist_ok=True)
+    (input_zarr / ".zarray").touch()
+    ran = []
+
+    def fake_infer(*, output_tiff, **kwargs):
+        output_tiff.parent.mkdir(parents=True, exist_ok=True)
+        output_tiff.touch()
+        ran.append(output_tiff.name)
+
+    monkeypatch.setattr(
+        "vesuvius.ink_detection.inference.infer.infer_single_zarr", fake_infer
+    )
+    args = SimpleNamespace(
+        folder=tmp_path / "data",
+        checkpoint=checkpoint,
+        output_prefix="",
+        direction="forward",
+    )
+    infer_folder(args, None, device=torch.device("cpu"))
+    return ran
+
+
+def test_folder_mode_runs_a_different_checkpoint_with_the_same_file_name(
+    tmp_path, monkeypatch
+):
+    seed_a = tmp_path / "seed42" / "step-020000.pth"
+    seed_b = tmp_path / "seed43" / "step-020000.pth"
+    for path, weights in ((seed_a, b"weights of seed 42"), (seed_b, b"weights of seed 43")):
+        path.parent.mkdir()
+        path.write_bytes(weights)
+
+    first = _folder_run(tmp_path, monkeypatch, seed_a)
+    second = _folder_run(tmp_path, monkeypatch, seed_b)
+
+    assert len(first) == 1 and len(second) == 1
+    assert first != second
+    predictions = sorted(p.name for p in (tmp_path / "data" / "segment" / "preds").iterdir())
+    assert len(predictions) == 2
+
+
+def test_folder_mode_runs_a_retrained_checkpoint_at_the_same_path(
+    tmp_path, monkeypatch
+):
+    checkpoint = tmp_path / "ckpt_020000.pth"
+    checkpoint.write_bytes(b"first training round")
+    first = _folder_run(tmp_path, monkeypatch, checkpoint)
+    checkpoint.write_bytes(b"after retraining on extended labels")
+
+    second = _folder_run(tmp_path, monkeypatch, checkpoint)
+
+    assert len(first) == 1 and len(second) == 1
+    assert first != second
+
+
+def test_folder_mode_still_skips_the_same_checkpoint(tmp_path, monkeypatch):
+    checkpoint = tmp_path / "ckpt_020000.pth"
+    checkpoint.write_bytes(b"weights")
+
+    first = _folder_run(tmp_path, monkeypatch, checkpoint)
+    second = _folder_run(tmp_path, monkeypatch, checkpoint)
+
+    assert len(first) == 1
+    assert second == []
+
+
 def test_cpu_command_checkpoint_to_tiff_timeline(tmp_path, caplog):
     config_mapping = _config_mapping(
         "vesuvius_unet_2p5d", depth=3, side=16
