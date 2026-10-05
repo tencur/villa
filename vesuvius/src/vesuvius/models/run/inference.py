@@ -2,6 +2,7 @@ import torch
 import numpy as np
 import zarr
 import os
+import shutil
 import errno
 try:
     import fcntl  # POSIX-only; used to serialize model-cache downloads
@@ -464,12 +465,20 @@ class Inferer():
                 verbose=self.verbose
             )
             
-            # Check if this is a train.py model from HuggingFace
-            if isinstance(model_info, dict) and model_info.get('is_train_py', False):
-                checkpoint_path = Path(model_info['checkpoint_path'])
-                if self.verbose:
-                    print(f"Loading train.py checkpoint from HuggingFace: {checkpoint_path}")
-                model_info = self._load_train_py_model(checkpoint_path)
+            download_dir = model_info.get('temp_dir') if isinstance(model_info, dict) else None
+            try:
+                # Check if this is a train.py model from HuggingFace
+                if isinstance(model_info, dict) and model_info.get('is_train_py', False):
+                    checkpoint_path = Path(model_info['checkpoint_path'])
+                    if self.verbose:
+                        print(f"Loading train.py checkpoint from HuggingFace: {checkpoint_path}")
+                    model_info = self._load_train_py_model(checkpoint_path)
+            finally:
+                # The repository was downloaded into a fresh temporary directory for this
+                # run. The model is in memory now, so remove the copy (about twice the
+                # checkpoint size) instead of leaving one behind in /tmp on every run.
+                if download_dir:
+                    shutil.rmtree(download_dir, ignore_errors=True)
         else:
             model_path = Path(self.model_path)
             is_train_py_checkpoint = model_path.is_file() and model_path.suffix == '.pth'
