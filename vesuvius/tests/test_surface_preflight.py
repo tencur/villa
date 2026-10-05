@@ -504,6 +504,117 @@ def test_open_volume_preserves_standalone_array_store(monkeypatch) -> None:
     assert key == ""
 
 
+class NoCredentialsError(Exception):
+    """Stands in for botocore.exceptions.NoCredentialsError, matched by name."""
+
+
+def _patch_remote_open(monkeypatch, outcomes):
+    """Route fsspec.get_mapper and zarr.open through fakes.
+
+    ``outcomes`` maps the ``anon`` flag a mapper was built with (None when it
+    was not passed) to the array to return or the exception to raise.
+    Returns the list of (url, kwargs) mapper requests, in order.
+    """
+    requests: list[tuple[str, dict[str, object]]] = []
+
+    def get_mapper(url, **kwargs):
+        requests.append((url, kwargs))
+        return ("mapper", kwargs.get("anon"))
+
+    class FakeZarr:
+        @staticmethod
+        def open(store, mode):
+            assert mode == "r"
+            outcome = outcomes[store[1]]
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
+    monkeypatch.setattr("fsspec.get_mapper", get_mapper)
+    monkeypatch.setitem(sys.modules, "zarr", FakeZarr)
+    return requests
+
+
+@pytest.mark.parametrize(
+    "signed_failure",
+    [
+        NoCredentialsError("Unable to locate credentials"),
+        PermissionError("Forbidden"),
+    ],
+    ids=["no-credentials", "stale-credentials"],
+)
+def test_open_volume_reads_public_s3_without_usable_credentials(
+    monkeypatch, signed_failure
+) -> None:
+    expected = FakeVolume(np.ones((2, 2, 2), dtype=np.uint8))
+    requests = _patch_remote_open(
+        monkeypatch, {None: signed_failure, True: expected}
+    )
+
+    array, key = surface_preflight._open_volume("s3://bucket/volume.zarr", None)
+
+    assert array is expected
+    assert key == ""
+    assert requests == [
+        ("s3://bucket/volume.zarr", {}),
+        ("s3://bucket/volume.zarr", {"anon": True}),
+    ]
+
+
+def test_open_volume_prefers_configured_s3_credentials(monkeypatch) -> None:
+    expected = FakeVolume(np.ones((2, 2, 2), dtype=np.uint8))
+    requests = _patch_remote_open(monkeypatch, {None: expected})
+
+    array, _ = surface_preflight._open_volume("s3://bucket/volume.zarr", None)
+
+    assert array is expected
+    assert requests == [("s3://bucket/volume.zarr", {})]
+
+
+def test_open_volume_reports_credential_error_for_private_s3(monkeypatch) -> None:
+    signed_failure = NoCredentialsError("Unable to locate credentials")
+    requests = _patch_remote_open(
+        monkeypatch, {None: signed_failure, True: PermissionError("Access Denied")}
+    )
+
+    with pytest.raises(NoCredentialsError) as raised:
+        surface_preflight._open_volume("s3://private/volume.zarr", None)
+
+    assert raised.value is signed_failure
+    assert len(requests) == 2
+
+
+def test_open_volume_reports_missing_public_s3_store(monkeypatch) -> None:
+    missing = FileNotFoundError("no group at s3://bucket/typo.zarr")
+    _patch_remote_open(
+        monkeypatch,
+        {None: NoCredentialsError("Unable to locate credentials"), True: missing},
+    )
+
+    with pytest.raises(FileNotFoundError) as raised:
+        surface_preflight._open_volume("s3://bucket/typo.zarr", None)
+
+    assert raised.value is missing
+
+
+def test_open_volume_does_not_retry_unrelated_s3_errors(monkeypatch) -> None:
+    requests = _patch_remote_open(monkeypatch, {None: ValueError("not a zarr")})
+
+    with pytest.raises(ValueError, match="not a zarr"):
+        surface_preflight._open_volume("s3://bucket/volume.zarr", None)
+
+    assert requests == [("s3://bucket/volume.zarr", {})]
+
+
+def test_open_volume_never_sends_anon_to_non_s3_remotes(monkeypatch) -> None:
+    requests = _patch_remote_open(monkeypatch, {None: PermissionError("Forbidden")})
+
+    with pytest.raises(PermissionError):
+        surface_preflight._open_volume("https://host/volume.zarr", None)
+
+    assert requests == [("https://host/volume.zarr", {})]
+
+
 def test_resolve_volume_array_accepts_explicit_base_key() -> None:
     expected = FakeVolume(np.ones((2, 2, 2), dtype=np.uint8))
 

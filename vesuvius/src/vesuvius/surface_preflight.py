@@ -162,6 +162,26 @@ def _resolve_volume_array(opened: Any, array_key: str | None) -> tuple[Any, str]
     )
 
 
+_S3_CREDENTIAL_ERROR_NAMES = frozenset(
+    {"NoCredentialsError", "PartialCredentialsError", "CredentialRetrievalError"}
+)
+
+
+def _is_s3_credential_failure(exc: BaseException) -> bool:
+    """True when a signed S3 request failed for want of usable credentials.
+
+    s3fs raises ``PermissionError`` for a rejected signature (expired token,
+    unknown access key, access denied); botocore raises its own errors when it
+    finds no credentials at all. Matching those by name keeps botocore an
+    optional import here.
+    """
+    if isinstance(exc, PermissionError):
+        return True
+    return any(
+        cls.__name__ in _S3_CREDENTIAL_ERROR_NAMES for cls in type(exc).__mro__
+    )
+
+
 def _open_volume(volume: str, array_key: str | None) -> tuple[Any, str]:
     try:
         import zarr
@@ -186,8 +206,30 @@ def _open_volume(volume: str, array_key: str | None) -> tuple[Any, str]:
         store = fsspec.get_mapper(store_volume)
     elif store_volume.startswith("file://"):
         store = store_volume.removeprefix("file://")
-    opened = zarr.open(store, mode="r")
-    return _resolve_volume_array(opened, direct_key or array_key)
+
+    def open_store(store: Any) -> tuple[Any, str]:
+        opened = zarr.open(store, mode="r")
+        return _resolve_volume_array(opened, direct_key or array_key)
+
+    if not store_volume.startswith("s3://"):
+        return open_store(store)
+
+    # The open-data bucket is published public-read and its catalog lists volumes
+    # by s3:// URI, so a machine with no (or stale) AWS credentials must still be
+    # able to read it. Use the configured credentials first so private buckets
+    # keep working, then retry unsigned, as zarr_utils.zarr_array_exists does.
+    try:
+        return open_store(store)
+    except Exception as exc:
+        if not _is_s3_credential_failure(exc):
+            raise
+        try:
+            return open_store(fsspec.get_mapper(store_volume, anon=True))
+        except Exception as anon_exc:
+            if _is_s3_credential_failure(anon_exc):
+                # Not public either: the credential problem is the real cause.
+                raise exc
+            raise
 
 
 def _iter_blocks(height: int, block_rows: int) -> Iterable[tuple[int, int]]:
