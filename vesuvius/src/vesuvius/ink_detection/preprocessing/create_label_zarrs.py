@@ -506,6 +506,24 @@ def _build_downsample_levels_from_zarr(
                 future.result()
 
 
+def _image_is_newer_than_output(input_path: Path, output_path: Path) -> bool:
+    """Return whether the image was modified after its output was last written.
+
+    The output's time is that of its newest file, so a dataset whose image and
+    store were downloaded together is left alone even when the image happens to
+    land after the store's first metadata file.
+    """
+    newest_output_ns = output_path.stat().st_mtime_ns
+    if output_path.is_dir():
+        for directory, _, filenames in os.walk(output_path):
+            for filename in filenames:
+                newest_output_ns = max(
+                    newest_output_ns,
+                    os.stat(os.path.join(directory, filename)).st_mtime_ns,
+                )
+    return input_path.stat().st_mtime_ns > newest_output_ns
+
+
 def convert_image(
     input_path: Path,
     *,
@@ -513,14 +531,23 @@ def convert_image(
     overwrite: bool = False,
     chunk_workers: int = 1,
 ) -> dict[str, str]:
-    """Convert one label or context image, skipping an existing output by default."""
+    """Convert one label or context image, skipping an output that is up to date.
+
+    An existing output is replaced when ``overwrite`` is set, and also when the
+    image was modified after the output was written: an edited label would
+    otherwise stay unconverted and the trainer would keep reading the old one.
+    """
     output_path = input_path.with_suffix(".zarr")
+    replaced_stale_output = False
     if not overwrite and output_path.exists():
-        return {
-            "status": "skipped",
-            "input": str(input_path),
-            "output": str(output_path),
-        }
+        if not _image_is_newer_than_output(input_path, output_path):
+            return {
+                "status": "skipped",
+                "input": str(input_path),
+                "output": str(output_path),
+            }
+        overwrite = True
+        replaced_stale_output = True
     downsample_mode: Literal["nearest", "mean"] = (
         "mean" if is_composite_image(input_path) else "nearest"
     )
@@ -552,6 +579,7 @@ def convert_image(
         "output": str(output_path),
         "downsample_mode": downsample_mode,
         "streamed_tiled_tiff": str(streamable_metadata is not None).lower(),
+        "replaced_stale_output": str(replaced_stale_output).lower(),
     }
 
 
@@ -696,10 +724,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     errors = list(outcome["errors"])
     written = sum(result["status"] == "written" for result in results)
     skipped = sum(result["status"] == "skipped" for result in results)
+    updated = sum(result.get("replaced_stale_output") == "true" for result in results)
     print(
         f"Processed {len(image_paths)} image(s): "
         f"{written} written, {skipped} skipped, {len(errors)} failed."
     )
+    if updated:
+        print(
+            f"{updated} of the written output(s) replaced a .zarr that was older "
+            "than its image."
+        )
     if errors:
         for error in errors:
             print(f"ERROR {error['input']}: {error['error']}")
