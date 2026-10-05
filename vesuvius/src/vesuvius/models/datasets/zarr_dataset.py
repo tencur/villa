@@ -688,6 +688,8 @@ class ZarrDataset(Dataset):
             unlabeled_fg_enabled=self.unlabeled_fg_enabled,
             unlabeled_fg_threshold=self.unlabeled_fg_threshold,
             unlabeled_fg_bbox_threshold=self.unlabeled_fg_bbox_threshold,
+            # The patch finder validates against the first target's labels.
+            label_paths=[vol.label_paths.get(self.target_names[0]) for vol in self._volumes],
         )
 
     def _load_from_cache(self, cache_data) -> None:
