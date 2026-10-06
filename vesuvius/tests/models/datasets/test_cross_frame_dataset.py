@@ -476,3 +476,38 @@ def test_binarize_labels_explicit_overrides_default(tmp_path: Path):
     sample = ds[0]
     label = sample["fibers"].numpy().squeeze(0)
     assert set(np.unique(label).tolist()).issubset({0.0, 1.0})
+
+
+def test_full_scan_patch_contains_its_foreground(tmp_path: Path):
+    """The full-resolution scan (default without labels_scan_level) must emit image patches
+    that contain the label foreground that selected them, like the coarse scan does."""
+    rng = np.random.default_rng(2)
+    image = rng.integers(1, 255, size=(64, 64, 64), dtype=np.uint8)
+    labels = np.zeros((64, 64, 64), dtype=np.uint8)
+    labels[36:44, 36:44, 36:44] = 1  # inside label patch [32, 48) only
+
+    image_path = tmp_path / "image.zarr"
+    labels_path = tmp_path / "labels.zarr"
+    tform_path = tmp_path / "transform.json"
+    _write_zarr_array(image_path, image, chunks=(16, 16, 16))
+    _write_zarr_array(labels_path, labels, chunks=(16, 16, 16))
+    m = np.eye(4)
+    m[:3, 3] = [3.0, 3.0, 3.0]  # label = image + 3, so image = label - 3
+    _write_transform(tform_path, m)
+
+    mgr = _make_mgr(
+        image_url=str(image_path),
+        labels_url=str(labels_path),
+        transform_url=str(tform_path),
+        patch_size=(16, 16, 16),
+        min_labeled_ratio=0.0,
+        min_bbox_percent=0.0,
+        cache_dir=tmp_path,
+    )
+    ds = CrossFrameZarrDataset(mgr, is_training=False)
+    assert len(ds) >= 1
+    for i in range(len(ds)):
+        sample = ds[i]
+        label_patch = np.asarray(sample["fibers"])
+        assert label_patch.sum() > 0, f"patch {sample['patch_info']['position']} holds none of the foreground"
+        assert not sample.get("is_unlabeled", False)

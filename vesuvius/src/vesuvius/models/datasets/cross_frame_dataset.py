@@ -561,14 +561,16 @@ class CrossFrameZarrDataset(Dataset):
                         mask = slab > 0
                     if not mask.any():
                         continue
-                    # Center of this label patch -> image voxel -> snap.
+                    # Center of this label patch -> image voxel -> snap to the
+                    # stride cell that CONTAINS it (same rule as the coarse scan),
+                    # so the patch [start, start + ps) covers the mapped center.
                     center_label = np.array(
                         [z + dz / 2.0, y + dy / 2.0, x + dx / 2.0], dtype=np.float64
                     )[None, :]
                     center_image = affine.apply_affine_zyx(
                         self._matrix_zyx_label_to_image, center_label
                     )[0]
-                    start = np.floor(center_image - ps_arr / 2.0).astype(np.int64)
+                    start = np.floor(center_image).astype(np.int64)
                     start = (start // st_arr) * st_arr
                     if np.any(start < 0) or np.any(start + ps_arr > image_shape):
                         continue
