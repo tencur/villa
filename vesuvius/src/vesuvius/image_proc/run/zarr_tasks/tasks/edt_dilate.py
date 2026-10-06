@@ -69,29 +69,43 @@ def _edt_dilate_worker(
 
     z_start, z_end, y_start, y_end, x_start, x_end = chunk_bounds
 
-    # Read input chunk
+    # Read the chunk with a halo wider than the dilation distance, so that foreground
+    # just across a chunk face dilates into this chunk. Without it every chunk was
+    # dilated on its own and the dilation stopped at each seam.
     input_arr = zarr.open(input_path, mode="r")[resolution]
-    chunk_data = input_arr[z_start:z_end, y_start:y_end, x_start:x_end]
+    halo = int(np.ceil(distance)) + 1
+    shape = input_arr.shape
+    lo = [max(0, start - halo) for start in (z_start, y_start, x_start)]
+    hi = [min(size, end + halo) for size, end in zip(shape, (z_end, y_end, x_end))]
+    block = input_arr[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]
 
     # Create binary mask of nonzero values
-    mask = chunk_data != 0
+    mask = block != 0
 
-    # Skip if chunk is all background (empty)
+    # Skip if no foreground is within reach of this chunk
     if not mask.any():
         return (chunk_idx, False)
 
     # Invert mask for EDT (EDT computes distance from True voxels)
     inverted = ~mask
 
-    # Compute EDT
+    # Compute EDT. In the inverted mask foreground is 0, so the edt package's
+    # black_border=True would treat everything outside the block as foreground and
+    # paint a shell along every face. --black-border (default True) means the volume
+    # boundary is background, i.e. black_border=False here; the halo covers the seams.
     if HAS_EDT:
         # Ensure contiguity for edt package
         if not inverted.flags["C_CONTIGUOUS"]:
             inverted = np.ascontiguousarray(inverted)
         # Use single thread since we parallelize over chunks
-        distances = edt_package.edt(inverted, parallel=1, black_border=black_border)
+        distances = edt_package.edt(inverted, parallel=1, black_border=not black_border)
     else:
         distances = scipy_edt(inverted)
+    distances = distances[
+        z_start - lo[0]:z_end - lo[0],
+        y_start - lo[1]:y_end - lo[1],
+        x_start - lo[2]:x_end - lo[2],
+    ]
 
     # Threshold to create dilated mask
     dilated = (distances <= distance).astype(np.uint8)
@@ -134,7 +148,7 @@ class EdtDilateTask(ZarrTask):
             "--black-border",
             type=lambda x: x.lower() in ("true", "1", "yes"),
             default=True,
-            help="Treat volume boundary as background (default: True)",
+            help="Treat space outside the volume as background (default: True); false treats it as foreground",
         )
         parser.add_argument(
             "--resolution",
