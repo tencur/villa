@@ -72,6 +72,9 @@ class ConfigManager:
         # Load mean teacher / semi-supervised trainer config
         # These parameters are used by TrainMeanTeacher and TrainUncertaintyAwareMeanTeacher
         mean_teacher_config = config.get("mean_teacher_config", {})
+        # Kept as a section too: its ema_decay (the teacher's decay) shares a name with the
+        # model-EMA ema_decay that _init_attributes sets below, which overwrites the flat attribute.
+        self.mean_teacher_config = dict(mean_teacher_config or {})
         for key, value in mean_teacher_config.items():
             setattr(self, key, value)
 

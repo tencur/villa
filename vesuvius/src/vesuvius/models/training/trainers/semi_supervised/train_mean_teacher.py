@@ -7,6 +7,7 @@ from torch.utils.data import DataLoader, SubsetRandomSampler
 from vesuvius.models.training.train import BaseTrainer
 from vesuvius.models.training.trainers.semi_supervised.two_stream_batch_sampler import TwoStreamBatchSampler
 from vesuvius.models.training.trainers.semi_supervised import ramps
+from vesuvius.models.training.trainers.semi_supervised.ramps import mean_teacher_ema_decay
 
 
 class TrainMeanTeacher(BaseTrainer):
@@ -23,7 +24,7 @@ class TrainMeanTeacher(BaseTrainer):
         super().__init__(mgr, verbose)
 
         # Core hyperparameters
-        self.ema_decay = getattr(mgr, 'ema_decay', 0.99)
+        self.ema_decay = mean_teacher_ema_decay(mgr)
         self.consistency_weight = getattr(mgr, 'consistency_weight', 0.1)
         self.consistency_rampup = getattr(mgr, 'consistency_rampup', 200.0)
         self.noise_scale = getattr(mgr, 'noise_scale', 0.1)  # Input noise for teacher
