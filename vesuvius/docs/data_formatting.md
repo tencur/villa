@@ -116,7 +116,7 @@ dataset_config:
           weight: 1.0
 ```
 
-Label files must exist for each task (e.g., `fragment01_ink.tif` and `fragment01_damage.tif`). If one task lacks annotations for a volume, leave that file out; the loader can skip unlabeled pairs when `allow_unlabeled_data: true` is set in the config.
+Label files must exist for each task (e.g., `fragment01_ink.tif` and `fragment01_damage.tif`). If one task lacks annotations for a volume, leave that file out and set `allow_unlabeled_data: true`. Give that task an `ignore_label`: the missing label is then filled with the ignore value and excluded from the task's loss. Without an `ignore_label` the missing label is read as all background.
 
 ### Auxiliary Targets
 

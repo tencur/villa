@@ -115,6 +115,16 @@ class ZarrDataset(Dataset):
         self.skip_patch_validation = getattr(mgr, 'skip_patch_validation', False)
         self.allow_unlabeled_data = getattr(mgr, 'allow_unlabeled_data', False)
 
+        # Fill value for a target whose label file is missing in a volume: its ignore value, so the
+        # loss skips it. Without an ignore value the zeros train as background (warned once below).
+        self._missing_label_fill = {}
+        for name in self.target_names:
+            info = self.targets.get(name) or {}
+            for alias in ("ignore_index", "ignore_label", "ignore_value"):
+                if info.get(alias) is not None:
+                    self._missing_label_fill[name] = info[alias]
+                    break
+
         # Mapping file parameters (for packed sparse zarr)
         self.allow_gap_extension = getattr(mgr, 'allow_gap_extension', True)
 
@@ -207,7 +217,16 @@ class ZarrDataset(Dataset):
                         )
                     label_paths[target] = None
                     label_arrays[target] = None
-                    logger.warning("No label found for volume '%s' target '%s'", volume_id, target)
+                    if target in self._missing_label_fill:
+                        logger.warning(
+                            "No label found for volume '%s' target '%s'; it is filled with the ignore "
+                            "value %s and excluded from that target's loss",
+                            volume_id, target, self._missing_label_fill[target])
+                    else:
+                        logger.warning(
+                            "No label found for volume '%s' target '%s' and the target has no "
+                            "ignore_label: its patches will train '%s' as background (set ignore_label "
+                            "to exclude them)", volume_id, target, target)
 
             image_array = self._open_zarr(image_path)
             spatial_shape = self._get_spatial_shape(image_array)
@@ -888,6 +907,12 @@ class ZarrDataset(Dataset):
         for target_name in self.target_names:
             label_arr = vol.label_arrays.get(target_name)
             label_data = load_array(label_arr)
+            if label_arr is None:
+                # No annotation for this target in this volume (allow_unlabeled_data): mark it as
+                # ignored rather than as background, when the target has an ignore value.
+                ignore_value = self._missing_label_fill.get(target_name)
+                if ignore_value is not None:
+                    label_data = np.full_like(label_data, float(ignore_value))
             if label_arr is not None and np.count_nonzero(label_data) > 0:
                 is_unlabeled = False
             result[target_name] = torch.from_numpy(label_data[np.newaxis, ...])
