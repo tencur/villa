@@ -25,6 +25,12 @@ def get_bbox(zyxs):
     ]
 
 
+def scale_patch_for_save(patch_zyxs, volume_scale):
+    """Scale a traced ZYX lattice to level-0 coordinates, keeping -1 at empty vertices."""
+    patch = patch_zyxs.detach().cpu().numpy() if hasattr(patch_zyxs, "detach") else np.asarray(patch_zyxs)
+    return np.where((patch == -1).all(-1, keepdims=True), -1, patch * 2 ** volume_scale)
+
+
 def save_tifxyz(zyxs, path, uuid, step_size, voxel_size_um, source, additional_metadata={}):
     if hasattr(zyxs, "detach"):
         zyxs = zyxs.detach().cpu().numpy()
