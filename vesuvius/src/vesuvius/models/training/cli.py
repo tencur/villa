@@ -153,8 +153,9 @@ def build_parser() -> argparse.ArgumentParser:
                            help="Number of warmup steps for cosine_warmup scheduler")
 
     # Trainer Selection
-    grp_trainer.add_argument("--trainer", "--tr", type=str, default="base",
-                             help="Trainer: base, surface_frame, mean_teacher, uncertainty_aware_mean_teacher, primus_mae, unet_mae, finetune_mae_unet")
+    grp_trainer.add_argument("--trainer", "--tr", type=str, default=None,
+                             help="Trainer: base, surface_frame, mean_teacher, uncertainty_aware_mean_teacher, primus_mae, unet_mae, finetune_mae_unet "
+                                  "(default: tr_config.trainer from the config, else base)")
     grp_trainer.add_argument("--ssl-warmup", type=int, default=None,
                              help="Semi-supervised: epochs to ignore EMA consistency loss (0 disables)")
     # Semi-supervised sampling controls (used by mean_teacher/uncertainty_aware_mean_teacher)
@@ -184,6 +185,14 @@ def build_parser() -> argparse.ArgumentParser:
                              help="Enable verbose debug output")
 
     return parser
+
+
+def resolve_trainer_name(cli_trainer, mgr):
+    """--trainer if given, else the config's tr_config.trainer, else 'base'."""
+    if cli_trainer:
+        return str(cli_trainer).lower()
+    configured = (getattr(mgr, "tr_configs", None) or {}).get("trainer")
+    return str(configured).lower() if configured else "base"
 
 
 def main(argv=None):
@@ -332,7 +341,7 @@ def main(argv=None):
         else:
             print("DDP requested but only one process determined; proceeding single-process.")
 
-    trainer_name = args.trainer.lower()
+    trainer_name = resolve_trainer_name(args.trainer, mgr)
     mgr.trainer_class = trainer_name
 
     # Enforce usage of --pretrained_checkpoint only for the MAE finetune trainer, and require it there
