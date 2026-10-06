@@ -15,6 +15,8 @@ from typing import Any, Iterable, List, Optional, Tuple
 
 import numpy as np
 import zarr
+
+from vesuvius.data.utils import create_zarr_array, open_zarr_group
 from numcodecs import Blosc
 from tqdm import tqdm
 
@@ -288,8 +290,9 @@ class MergeTask(ZarrTask):
         output_path = Path(self.config.output_zarr)
         print(f"\nCreating output zarr at {output_path}")
 
-        root = zarr.open(str(output_path), mode="w")
-        root.create_dataset(
+        root = open_zarr_group(str(output_path), mode="w")
+        create_zarr_array(
+            root,
             "0",
             shape=self._shape,
             chunks=self._chunks,
@@ -337,7 +340,8 @@ class MergeTask(ZarrTask):
             print(f"Level {level}: {prev_shape} -> {out_shape}")
 
             # Create output array
-            root.create_dataset(
+            create_zarr_array(
+                root,
                 str(level),
                 shape=out_shape,
                 chunks=self._chunks,
