@@ -655,9 +655,13 @@ def project_labels_and_supervision(
     label_half_thickness: float,
     background_half_thickness: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Project mutually exclusive binary foreground/background support."""
-    labels = np.asarray(inklabels_flat) > 0
+    """Project mutually exclusive binary foreground/background support.
+
+    Only supervised pixels are projected: ink outside the supervision mask (for a training patch this includes
+    the segment's held-out validation pixels, which the caller has removed from supervision) stays unsupervised.
+    """
     supervision = np.asarray(supervision_flat) > 0
+    labels = (np.asarray(inklabels_flat) > 0) & supervision
     background = supervision & ~labels
     labels_native = project_binary_mask_along_normals(
         labels,
