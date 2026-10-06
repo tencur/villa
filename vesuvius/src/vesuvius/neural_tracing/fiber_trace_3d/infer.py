@@ -318,6 +318,13 @@ def _resolve_inference_precision(
     return mode, source
 
 
+def apply_inference_precision(predict_adapter, precision_mode: str) -> None:
+    """Make the adapter run at the resolved inference precision (not the checkpoint's training one)."""
+    training = dict(predict_adapter.config.get("training", {}))
+    training["mixed_precision"] = precision_mode
+    predict_adapter.config["training"] = training
+
+
 def _select_and_expand_crop(
     *,
     input_shape_zyx: tuple[int, int, int],
@@ -537,6 +544,9 @@ def run_fiber_trace_3d_inference(
         zarr_path_prefix=output_dir / json_stem,
         recurrent_steps=recurrent_steps,
     )
+    # The adapter overlays the checkpoint's config (including its training section) on the
+    # runtime config; keep the precision resolved above, which is what is logged and recorded.
+    apply_inference_precision(predict_adapter, precision_mode)
     output_adapter = OmeZarrOutputAdapter(
         products=predict_adapter.output_products,
         n_levels=n_levels,
