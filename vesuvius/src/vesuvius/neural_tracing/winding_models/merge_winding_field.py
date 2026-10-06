@@ -42,6 +42,7 @@ import hashlib
 import json
 import math
 import os
+import threading
 import shlex
 import shutil
 import sys
@@ -1217,12 +1218,36 @@ class OmeZarrPyramidWriter:
                  **({"downsampling_method": "mean"} if level else {})})
         self._pool = ThreadPoolExecutor(max_workers=16)
         self._futures = []
+        # One lock per chunk: tiles at levels 0/1 can share a chunk when the band
+        # origin is not chunk-aligned, so a chunk may be written more than once.
+        self._chunk_locks = {}
+        self._chunk_locks_guard = threading.Lock()
+
+    def _chunk_lock(self, level, chunk_index):
+        key = (int(level), tuple(int(v) for v in chunk_index))
+        with self._chunk_locks_guard:
+            lock = self._chunk_locks.get(key)
+            if lock is None:
+                lock = self._chunk_locks[key] = threading.Lock()
+        return lock
 
     def _write_chunk(self, level, chunk_index, values):
         destination = (
             self.path / str(level)
             / str(chunk_index[0]) / str(chunk_index[1]) / str(chunk_index[2]))
         destination.parent.mkdir(parents=True, exist_ok=True)
+        with self._chunk_lock(level, chunk_index):
+            self._write_chunk_locked(destination, values)
+
+    def _write_chunk_locked(self, destination, values):
+        if destination.exists():
+            # Merge with what an earlier block wrote to this chunk: keep the
+            # existing voxels wherever this block has none (0 = invalid/fill).
+            with open(destination, "rb") as stream:
+                existing = np.frombuffer(
+                    self.compressor.decode(stream.read()), dtype=np.uint16
+                ).reshape(values.shape)
+            values = np.where(values != 0, values, existing)
         payload = bytes(self.compressor.encode(
             np.ascontiguousarray(values).tobytes()))
         temporary = destination.with_name(
@@ -1234,8 +1259,9 @@ class OmeZarrPyramidWriter:
     def write_block(self, level, origin, values):
         """Write a uint16 block at ``origin`` (level voxels), splitting into
         chunks; all-zero chunks are skipped (fill).  Chunks straddling the
-        block edge are zero-padded — the band is this array's only content,
-        so no read-modify-write is ever needed."""
+        block edge are zero-padded; where a chunk was already written by an
+        earlier block (level-0/1 tiles share chunks when the band origin is
+        not chunk-aligned) the two are merged, so nothing is overwritten."""
         for cz in range(origin[0] // CHUNK,
                         -(-(origin[0] + values.shape[0]) // CHUNK)):
             for cy in range(origin[1] // CHUNK,
