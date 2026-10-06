@@ -124,6 +124,28 @@ def create_training_transforms(
         if patch_h == patch_w:
             transpose_allowed_axes.update([1, 2])
 
+    # allowed_rotation_axes lists the axes the volume may be rotated about, as in
+    # SpatialTransform: rotating about z (axis 0) turns the y-x plane only, which keeps
+    # the depth axis upright. Rot90 and Transpose pick their planes from a set of axes,
+    # so a restriction is expressed as an explicit list of permitted planes.
+    restricted_planes = None
+    if dimension == 3 and allowed_rotation_axes is not None:
+        allowed = {int(axis) for axis in allowed_rotation_axes}
+        square_planes = [
+            plane for plane in ((1, 2), (0, 2), (0, 1))
+            if dims_3d[plane[0]] == dims_3d[plane[1]]
+        ]
+        permitted = [
+            plane for plane in square_planes
+            if ({0, 1, 2} - set(plane)).pop() in allowed
+        ]
+        if permitted != square_planes:
+            restricted_planes = permitted
+
+    def _per_plane(make_transform, planes):
+        options = [make_transform(set(plane)) for plane in planes]
+        return options[0] if len(options) == 1 else OneOfTransform(options)
+
     # Local transform scale parameters (derived from patch size)
     min_patch_dim = min(patch_size)
     _local_transform_scale = (min_patch_dim / 6, min_patch_dim / 2)
@@ -169,7 +191,20 @@ def create_training_transforms(
         # )
 
         # Rot90 for 3D (only if there are valid rotation axes), Mirror for 2D
-        if dimension == 3 and rot90_allowed_axes:
+        if dimension == 3 and restricted_planes is not None:
+            if restricted_planes:
+                transforms.append(RandomTransform(
+                    _per_plane(
+                        lambda axes: Rot90Transform(
+                            num_axis_combinations=1,
+                            num_rot_per_combination=(1, 2, 3),
+                            allowed_axes=axes,
+                        ),
+                        restricted_planes,
+                    ),
+                    apply_probability=0.5
+                ))
+        elif dimension == 3 and rot90_allowed_axes:
             transforms.append(RandomTransform(
                 Rot90Transform(
                     num_axis_combinations=1,
@@ -380,7 +415,16 @@ def create_training_transforms(
     else:
         # 3D-specific transforms
         # Transpose only between axes with equal dimensions (need at least 2 axes)
-        if not no_spatial and len(transpose_allowed_axes) >= 2:
+        if not no_spatial and restricted_planes is not None:
+            if restricted_planes:
+                transforms.append(RandomTransform(
+                    _per_plane(
+                        lambda axes: TransposeAxesTransform(allowed_axes=axes),
+                        restricted_planes,
+                    ),
+                    apply_probability=0.2
+                ))
+        elif not no_spatial and len(transpose_allowed_axes) >= 2:
             transforms.append(RandomTransform(
                 TransposeAxesTransform(allowed_axes=transpose_allowed_axes),
                 apply_probability=0.2
