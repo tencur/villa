@@ -690,34 +690,67 @@ class ZarrDataset(Dataset):
             unlabeled_fg_bbox_threshold=self.unlabeled_fg_bbox_threshold,
         )
 
+    def _cache_position_at_level(self, vol_idx: int, position) -> Optional[Tuple[int, ...]]:
+        """Map a cached (full-resolution) patch start onto the level the dataset reads.
+
+        vesuvius.find_patches stores level-0 coordinates. With ome_zarr_resolution > 0 the
+        volumes are opened at that pyramid level, so positions are divided by 2**level and kept
+        inside the level's shape.
+        """
+        level = int(self.ome_zarr_resolution or 0)
+        if level <= 0:
+            return tuple(position)
+        factor = 2 ** level
+        shape = self._volumes[vol_idx].spatial_shape if 0 <= vol_idx < len(self._volumes) else None
+        mapped = []
+        for axis, value in enumerate(position):
+            v = int(value) // factor
+            if shape is not None:
+                v = max(0, min(v, int(shape[axis]) - int(self.patch_size[axis])))
+            mapped.append(v)
+        return tuple(mapped)
+
     def _load_from_cache(self, cache_data) -> None:
         """Load patches from cache data."""
         # Build volume name -> index mapping
         volume_name_to_idx = {vol.volume_id: idx for idx, vol in enumerate(self._volumes)}
+        seen = set()
 
         # Add FG patches
+        n_fg = 0
         for entry in cache_data.fg_patches:
             vol_idx = volume_name_to_idx.get(entry.volume_name, entry.volume_idx)
+            position = self._cache_position_at_level(vol_idx, entry.position)
+            if (vol_idx, position) in seen:
+                continue
+            seen.add((vol_idx, position))
             self._patches.append(PatchInfo(
                 volume_index=vol_idx,
                 volume_name=entry.volume_name,
-                position=entry.position,
+                position=position,
                 patch_size=self.patch_size,
                 is_unlabeled_fg=False,
             ))
-        self._n_labeled_fg = len(cache_data.fg_patches)
+            n_fg += 1
+        self._n_labeled_fg = n_fg
 
         # Add unlabeled FG patches
+        n_unlabeled = 0
         for entry in cache_data.unlabeled_fg_patches:
             vol_idx = volume_name_to_idx.get(entry.volume_name, entry.volume_idx)
+            position = self._cache_position_at_level(vol_idx, entry.position)
+            if (vol_idx, position) in seen:
+                continue
+            seen.add((vol_idx, position))
             self._patches.append(PatchInfo(
                 volume_index=vol_idx,
                 volume_name=entry.volume_name,
-                position=entry.position,
+                position=position,
                 patch_size=self.patch_size,
                 is_unlabeled_fg=True,
             ))
-        self._n_unlabeled_fg = len(cache_data.unlabeled_fg_patches)
+            n_unlabeled += 1
+        self._n_unlabeled_fg = n_unlabeled
 
         logger.info(
             "Loaded %d patches from cache (%d labeled, %d unlabeled)",

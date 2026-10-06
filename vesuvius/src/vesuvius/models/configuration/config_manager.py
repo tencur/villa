@@ -269,6 +269,8 @@ class ConfigManager:
         # Skip finding the minimum bounding box which would contain all the labels.
         # its a bit of a waste of computation when considering the downsampled zarr patches are quite fast to check
         self.skip_bounding_box = bool(self.dataset_config.get("skip_bounding_box", True))
+        # OME-Zarr pyramid level the training dataset reads images and labels from
+        self.ome_zarr_resolution = int(self.dataset_config.get("ome_zarr_resolution", 0) or 0)
         self.cache_valid_patches = bool(self.dataset_config.get("cache_valid_patches", True))
 
         # BG-only patch sampling configuration
