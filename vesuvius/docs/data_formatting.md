@@ -66,11 +66,11 @@ dataset_config:
       losses:
         - name: "BCEWithLogitsLoss"
           weight: 0.5
-        - name: "SoftDiceLoss"
+        - name: "MemoryEfficientSoftDiceLoss"
           weight: 0.5
 ```
 
-Expect labels with background `0` and any positive value for foreground. Store them either as a single-channel volume with values `{0, 1}` or the raw grayscale mask produced by annotation tools. The loader converts non-zero entries to foreground when it evaluates patch coverage.
+Store binary labels as a single-channel volume with values `{0, 1}` (plus the target's ignore value, if configured). The training dataset does not binarize labels: a raw grayscale mask such as `0/255` must be converted first (for example `label > 0`), and the dataset raises an error if a single-channel target trained with `BCEWithLogitsLoss`, `nnUNet_DC_and_BCE_loss` or `MemoryEfficientSoftDiceLoss` holds other values. Patch coverage (`vesuvius.find_patches`) counts any non-zero voxel as labelled.
 
 ### Multi-Class Segmentation
 
@@ -149,7 +149,7 @@ All fields are documented in `vesuvius/models/configuration/config_manager.py` a
 ## Label Encoding Guidelines
 
 - Use unsigned integer dtypes (`uint8`, `uint16`, …) whenever possible.
-- Background must be zero; any positive value is treated as foreground when computing valid patches.
+- Background must be zero. For binary targets, foreground must be `1`; any positive value counts as labelled only when computing valid patches.
 - For multi-class tasks store consecutive integers starting at zero. There is no automatic remapping, so ensure that the values in the label volume match the configured number of channels.
 - When exporting from napari, choose the “labels” layer type to obtain integer masks instead of floating-point overlays.
 
@@ -174,7 +174,7 @@ Watch the log for messages about missing targets, unlabeled patches, or normaliz
 
 | Scenario | Data Layout | Target Config | Label Notes |
 |----------|-------------|---------------|-------------|
-| Binary segmentation | One label file per volume with `{0, 1}` values | `out_channels: 1`, `activation: sigmoid` | Any positive voxel counts as foreground |
+| Binary segmentation | One label file per volume with `{0, 1}` values | `out_channels: 1`, `activation: sigmoid` | Convert grayscale masks to `{0, 1}` first |
 | Multi-class segmentation | Single label map with integer class IDs | `out_channels: N`, `activation: softmax`, CE/Dice losses | Provide sequential integers `[0, N-1]` |
 | Multi-task | Separate label file per target | Multiple entries in `dataset_config.targets` | Targets share the same image volume |
 | Auxiliary regression | Primary label only | Configure under `auxiliary_tasks` | Auxiliary tensors are derived automatically |
