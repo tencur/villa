@@ -23,7 +23,7 @@ from vesuvius.utils.models.load_nnunet_model import load_model_for_inference
 from vesuvius.data.vc_dataset import VCDataset
 from vesuvius.data.utils import open_zarr
 from pathlib import Path
-from vesuvius.models.build.build_network_from_config import NetworkFromConfig
+from vesuvius.models.build.build_network_from_config import NetworkFromConfig, disable_eval_activations
 from vesuvius.models.run.external_models.load_resnet import try_load_external_resnet34_model
 from vesuvius.models.run.tta import infer_with_tta
 from vesuvius.models.run.patch_writer import BoundedPatchWriter
@@ -672,6 +672,12 @@ class Inferer():
         
         # Build model using NetworkFromConfig
         model = NetworkFromConfig(mgr)
+        disabled_activations = disable_eval_activations(model)
+        if disabled_activations and self.verbose:
+            print(
+                "Disabled eval-time output activations so the store holds logits: "
+                + ", ".join(f"{name} ({act})" for name, act in disabled_activations)
+            )
         model = model.to(self.device)
         
         # Load weights

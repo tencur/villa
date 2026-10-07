@@ -518,7 +518,7 @@ def load_model_from_checkpoint(checkpoint_path, device='cuda'):
     
     # Import required modules
     from vesuvius.models.configuration.config_manager import ConfigManager
-    from vesuvius.models.build.build_network_from_config import NetworkFromConfig
+    from vesuvius.models.build.build_network_from_config import NetworkFromConfig, disable_eval_activations
     
     # Create a ConfigManager instance
     mgr = ConfigManager(verbose=True)
@@ -644,8 +644,10 @@ def load_model_from_checkpoint(checkpoint_path, device='cuda'):
     except Exception:
         pass
 
-    # Build the model using the (possibly adjusted) config
+    # Build the model using the (possibly adjusted) config. Inference stores logits, so switch off
+    # the per-target eval-time activations (as Inferer._load_train_py_model does).
     model = NetworkFromConfig(mgr)
+    disable_eval_activations(model)
     
     # For inference, we'll load the model weights directly instead of using load_checkpoint
     # to avoid optimizer state issues
