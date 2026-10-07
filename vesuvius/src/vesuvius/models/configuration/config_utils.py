@@ -39,7 +39,8 @@ def configure_targets(mgr, loss_list=None):
                 mgr.targets[t] = {
                     "out_channels": 2,
                     "activation": "softmax",
-                    "loss_fn": "CrossEntropyLoss"
+                    "loss_fn": "CrossEntropyLoss",
+                    "losses": [{"name": "CrossEntropyLoss", "weight": 1.0}],
                 }
             print(f"Detected targets from data: {sorted(targets)}")
         else:
@@ -53,10 +54,12 @@ def configure_targets(mgr, loss_list=None):
     # Re-apply auxiliary tasks from config
     apply_auxiliary_tasks_from_config(mgr)
 
-    # Apply loss_list to configured targets, if provided
+    # Apply loss_list to configured targets, if provided. The trainer builds losses from the
+    # target's `losses` list only, so the override must be written there to take effect.
     if loss_list:
         names = list(mgr.targets.keys())
         for i, tname in enumerate(names):
             fn = loss_list[i] if i < len(loss_list) else loss_list[-1]
             mgr.targets[tname]["loss_fn"] = fn
+            mgr.targets[tname]["losses"] = [{"name": fn, "weight": 1.0}]
             print(f"Applied {fn} to target '{tname}'")
