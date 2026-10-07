@@ -115,17 +115,20 @@ def apply_finalization(logits_np, num_classes, config: FinalizeConfig):
     if mode == "binary":
         output_np = np.clip(output_np * 255.0, 0, 255).astype(np.uint8)
     else:
-        # Scale to uint8 range [0, 255]
-        min_val = output_np.min()
-        max_val = output_np.max()
-        if min_val < max_val:
-            output_np = ((output_np - min_val) / (max_val - min_val) * 255).astype(np.uint8)
+        # Fixed encoding so every chunk means the same thing: softmax channels as
+        # probabilities * 255, the argmax channel as class_id * 255 / (num_classes - 1)
+        # (0/255 for two classes, as before). A per-chunk min-max rescale made a class's
+        # value depend on which other classes happened to be present in that chunk, and
+        # dropped uniform-class chunks as empty.
+        class_step = 255.0 / max(1, int(num_classes) - 1)
+        if threshold is not None:
+            output_np = np.clip(np.rint(output_np * class_step), 0, 255).astype(np.uint8)
         else:
-            return None, True
-
-        # Final check: if the processed data is homogeneous, don't write it
-        first_processed_value = output_np.flat[0]
-        if np.all(output_np == first_processed_value):
+            softmax_u8 = np.clip(np.rint(output_np[:-1] * 255.0), 0, 255).astype(np.uint8)
+            argmax_u8 = np.clip(np.rint(output_np[-1:] * class_step), 0, 255).astype(np.uint8)
+            output_np = np.concatenate([softmax_u8, argmax_u8], axis=0)
+        # An all-zero chunk is the store's fill value and need not be written.
+        if not np.any(output_np):
             return None, True
 
     return output_np, False
