@@ -16,6 +16,65 @@ if not logger.handlers:
     logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
+def grid_starts(lo: int, hi: int, patch: int, stride: int, *, allow_short: bool = False) -> List[int]:
+    """Patch start positions covering [lo, hi) with the given stride.
+
+    Adds a final start aligned to ``hi - patch`` when the regular grid stops short of the end,
+    so voxels in the remainder strip of each axis are inside at least one patch (as the
+    inference sliding window already does). With ``allow_short`` a range shorter than one patch
+    yields a single start at ``lo`` (the patch is padded); otherwise it yields none.
+    """
+    lo, hi, patch, stride = int(lo), int(hi), int(patch), int(stride)
+    if hi - lo < patch:
+        return [lo] if allow_short else []
+    starts = list(range(lo, hi - patch + 1, stride))
+    if starts[-1] + patch < hi:
+        starts.append(hi - patch)
+    return starts
+
+
+def _full_res_start(pos: int, factor: int, last_start: Optional[int], full_hi: Optional[int], patch: int) -> int:
+    """Scale a patch start found at a downsampled level back to full resolution.
+
+    Level shapes are rounded, so ``pos * factor`` for an axis's last start can end short of the volume
+    or past it. The last start is therefore placed at ``full_hi - patch`` (the patch ends exactly at the
+    volume's end), and no other start may run past the end.
+    """
+    full = int(pos) * int(factor)
+    if factor > 1 and full_hi is not None and full_hi >= patch:
+        if pos == last_start or full + patch > full_hi:
+            full = int(full_hi) - int(patch)
+    return full
+
+
+def _full_res_extent(array_obj, resolve, spatial_ndim: int, level_shape, factor: int, bounds) -> List[int]:
+    """Full-resolution [.., hi) per spatial axis: the explicit max bound, else the level-0 shape."""
+    full_shape = None
+    if factor > 1:
+        full = resolve(array_obj, '0')
+        if full is not None:
+            full_shape = tuple(full.shape[:spatial_ndim])
+    if full_shape is None:
+        full_shape = tuple(int(s) * int(factor) for s in level_shape)
+    return [int(b) if b is not None else int(full_shape[i]) for i, b in enumerate(bounds)]
+
+
+def _stride_groups(starts: List[int], size: int, step: int) -> List[List[int]]:
+    """Split patch starts into groups of at most ``size`` consecutive starts spaced exactly ``step`` apart.
+
+    The block readers below read one contiguous block per group and view it with fixed strides, which is
+    only valid for regularly spaced starts. The end-aligned start added by ``grid_starts`` is usually not
+    on that spacing, so it starts a group of its own.
+    """
+    groups: List[List[int]] = []
+    for start in starts:
+        if groups and len(groups[-1]) < size and start - groups[-1][-1] == step:
+            groups[-1].append(start)
+        else:
+            groups.append([start])
+    return groups
+
+
 def _chunker(seq, chunk_size):
     """Yield successive 'chunk_size'-sized chunks from 'seq'."""
     for pos in range(0, len(seq), chunk_size):
@@ -357,6 +416,11 @@ def _collect_unlabeled_fg_from_image_only(
     # Get spatial shape from image
     image_shape = downsampled_image.shape
     spatial_shape = image_shape[:spatial_ndim] if len(image_shape) >= spatial_ndim else image_shape
+    full_hi = _full_res_extent(
+        image_array, _resolve_resolution, spatial_ndim, spatial_shape, actual_downsample_factor,
+        (max_y, max_x) if is_2d else (max_z, max_y, max_x),
+    )
+    full_patch = tuple(patch_size[-spatial_ndim:])
 
     # Generate candidate positions
     if is_2d:
@@ -366,8 +430,8 @@ def _collect_unlabeled_fg_from_image_only(
         vol_max_y = spatial_shape[0] if max_y is None else max_y // actual_downsample_factor
         vol_max_x = spatial_shape[1] if max_x is None else max_x // actual_downsample_factor
 
-        y_starts = list(range(vol_min_y, max(vol_min_y, vol_max_y - dpY + 1), dpY))
-        x_starts = list(range(vol_min_x, max(vol_min_x, vol_max_x - dpX + 1), dpX))
+        y_starts = grid_starts(vol_min_y, vol_max_y, dpY, dpY)
+        x_starts = grid_starts(vol_min_x, vol_max_x, dpX, dpX)
         candidate_count = len(y_starts) * len(x_starts)
     else:
         dpZ, dpY, dpX = actual_downsampled_patch_size
@@ -378,9 +442,9 @@ def _collect_unlabeled_fg_from_image_only(
         vol_max_y = spatial_shape[1] if max_y is None else max_y // actual_downsample_factor
         vol_max_x = spatial_shape[2] if max_x is None else max_x // actual_downsample_factor
 
-        z_starts = list(range(vol_min_z, max(vol_min_z, vol_max_z - dpZ + 1), dpZ))
-        y_starts = list(range(vol_min_y, max(vol_min_y, vol_max_y - dpY + 1), dpY))
-        x_starts = list(range(vol_min_x, max(vol_min_x, vol_max_x - dpX + 1), dpX))
+        z_starts = grid_starts(vol_min_z, vol_max_z, dpZ, dpZ)
+        y_starts = grid_starts(vol_min_y, vol_max_y, dpY, dpY)
+        x_starts = grid_starts(vol_min_x, vol_max_x, dpX, dpX)
         candidate_count = len(z_starts) * len(y_starts) * len(x_starts)
 
     logger.info(
@@ -408,14 +472,12 @@ def _collect_unlabeled_fg_from_image_only(
         chunk_y_patches = min(chunk_y_patches, len(y_starts))
         chunk_x_patches = min(chunk_x_patches, len(x_starts))
 
-        y_blocks = list(range(0, len(y_starts), chunk_y_patches))
-        for yi in tqdm(y_blocks, desc=f"  {label_name} (unlabeled)", position=1, leave=False):
-            y_group = y_starts[yi: yi + chunk_y_patches]
+        y_blocks = _stride_groups(y_starts, chunk_y_patches, dpY)
+        for y_group in tqdm(y_blocks, desc=f"  {label_name} (unlabeled)", position=1, leave=False):
             y_start = y_group[0]
             y_stop = y_group[-1] + dpY
 
-            for xi in range(0, len(x_starts), chunk_x_patches):
-                x_group = x_starts[xi: xi + chunk_x_patches]
+            for x_group in _stride_groups(x_starts, chunk_x_patches, dpX):
                 x_start = x_group[0]
                 x_stop = x_group[-1] + dpX
 
@@ -470,8 +532,8 @@ def _collect_unlabeled_fg_from_image_only(
                     for (yy, xx) in valid_idx:
                         pos_y = y_group[yy]
                         pos_x = x_group[xx]
-                        full_res_y = pos_y * actual_downsample_factor
-                        full_res_x = pos_x * actual_downsample_factor
+                        full_res_y = _full_res_start(pos_y, actual_downsample_factor, y_starts[-1], full_hi[0], full_patch[0])
+                        full_res_x = _full_res_start(pos_x, actual_downsample_factor, x_starts[-1], full_hi[1], full_patch[1])
                         unlabeled_fg_patches.append({
                             'volume_idx': vol_idx,
                             'volume_name': label_name,
@@ -486,19 +548,16 @@ def _collect_unlabeled_fg_from_image_only(
         chunk_y_patches = min(chunk_y_patches, len(y_starts))
         chunk_x_patches = min(chunk_x_patches, len(x_starts))
 
-        z_blocks = list(range(0, len(z_starts), chunk_z_patches))
-        for zi in tqdm(z_blocks, desc=f"  {label_name} (unlabeled)", position=1, leave=False):
-            z_group = z_starts[zi: zi + chunk_z_patches]
+        z_blocks = _stride_groups(z_starts, chunk_z_patches, dpZ)
+        for z_group in tqdm(z_blocks, desc=f"  {label_name} (unlabeled)", position=1, leave=False):
             z_start = z_group[0]
             z_stop = z_group[-1] + dpZ
 
-            for yi in range(0, len(y_starts), chunk_y_patches):
-                y_group = y_starts[yi: yi + chunk_y_patches]
+            for y_group in _stride_groups(y_starts, chunk_y_patches, dpY):
                 y_start = y_group[0]
                 y_stop = y_group[-1] + dpY
 
-                for xi in range(0, len(x_starts), chunk_x_patches):
-                    x_group = x_starts[xi: xi + chunk_x_patches]
+                for x_group in _stride_groups(x_starts, chunk_x_patches, dpX):
                     x_start = x_group[0]
                     x_stop = x_group[-1] + dpX
 
@@ -564,9 +623,9 @@ def _collect_unlabeled_fg_from_image_only(
                             pos_z = z_group[zz]
                             pos_y = y_group[yy]
                             pos_x = x_group[xx]
-                            full_res_z = pos_z * actual_downsample_factor
-                            full_res_y = pos_y * actual_downsample_factor
-                            full_res_x = pos_x * actual_downsample_factor
+                            full_res_z = _full_res_start(pos_z, actual_downsample_factor, z_starts[-1], full_hi[0], full_patch[0])
+                            full_res_y = _full_res_start(pos_y, actual_downsample_factor, y_starts[-1], full_hi[1], full_patch[1])
+                            full_res_x = _full_res_start(pos_x, actual_downsample_factor, x_starts[-1], full_hi[2], full_patch[2])
                             unlabeled_fg_patches.append({
                                 'volume_idx': vol_idx,
                                 'volume_name': label_name,
@@ -835,6 +894,10 @@ def find_valid_patches(
         position_gen_start = time.perf_counter()
 
         spatial_shape = downsampled_array.shape[:spatial_ndim]
+        full_hi = _full_res_extent(
+            label_array, _resolve_resolution, spatial_ndim, spatial_shape, actual_downsample_factor,
+            (max_y, max_x) if is_2d else (max_z, max_y, max_x),
+        )
 
         if is_2d:
             vol_min_y = min_y // actual_downsample_factor if min_y is not None else 0
@@ -843,8 +906,8 @@ def find_valid_patches(
             vol_max_x = spatial_shape[1] if max_x is None else max_x // actual_downsample_factor
 
             dpY, dpX = actual_downsampled_patch_size[-2:]
-            y_starts = list(range(vol_min_y, max(vol_min_y, vol_max_y - dpY + 1), dpY))
-            x_starts = list(range(vol_min_x, max(vol_min_x, vol_max_x - dpX + 1), dpX))
+            y_starts = grid_starts(vol_min_y, vol_max_y, dpY, dpY)
+            x_starts = grid_starts(vol_min_x, vol_max_x, dpX, dpX)
         else:
             vol_min_z = min_z // actual_downsample_factor if min_z is not None else 0
             vol_min_y = min_y // actual_downsample_factor if min_y is not None else 0
@@ -854,9 +917,9 @@ def find_valid_patches(
             vol_max_x = spatial_shape[2] if max_x is None else max_x // actual_downsample_factor
 
             dpZ, dpY, dpX = actual_downsampled_patch_size
-            z_starts = list(range(vol_min_z, max(vol_min_z, vol_max_z - dpZ + 1), dpZ))
-            y_starts = list(range(vol_min_y, max(vol_min_y, vol_max_y - dpY + 1), dpY))
-            x_starts = list(range(vol_min_x, max(vol_min_x, vol_max_x - dpX + 1), dpX))
+            z_starts = grid_starts(vol_min_z, vol_max_z, dpZ, dpZ)
+            y_starts = grid_starts(vol_min_y, vol_max_y, dpY, dpY)
+            x_starts = grid_starts(vol_min_x, vol_max_x, dpX, dpX)
 
         generate_elapsed = time.perf_counter() - position_gen_start
         candidate_count = (
@@ -915,14 +978,12 @@ def find_valid_patches(
             chunk_y_patches = min(chunk_y_patches, len(y_starts))
             chunk_x_patches = min(chunk_x_patches, len(x_starts))
 
-            y_blocks = list(range(0, len(y_starts), chunk_y_patches))
-            for yi in tqdm(y_blocks, desc=f"  {label_name} blocks", position=1, leave=False):
-                y_group = y_starts[yi: yi + chunk_y_patches]
+            y_blocks = _stride_groups(y_starts, chunk_y_patches, dpY)
+            for y_group in tqdm(y_blocks, desc=f"  {label_name} blocks", position=1, leave=False):
                 y_start = y_group[0]
                 y_stop = y_group[-1] + dpY
 
-                for xi in range(0, len(x_starts), chunk_x_patches):
-                    x_group = x_starts[xi: xi + chunk_x_patches]
+                for x_group in _stride_groups(x_starts, chunk_x_patches, dpX):
                     x_start = x_group[0]
                     x_stop = x_group[-1] + dpX
 
@@ -1123,19 +1184,16 @@ def find_valid_patches(
             chunk_y_patches = min(chunk_y_patches, len(y_starts))
             chunk_x_patches = min(chunk_x_patches, len(x_starts))
 
-            z_blocks = list(range(0, len(z_starts), chunk_z_patches))
-            for zi in tqdm(z_blocks, desc=f"  {label_name} blocks", position=1, leave=False):
-                z_group = z_starts[zi: zi + chunk_z_patches]
+            z_blocks = _stride_groups(z_starts, chunk_z_patches, dpZ)
+            for z_group in tqdm(z_blocks, desc=f"  {label_name} blocks", position=1, leave=False):
                 z_start = z_group[0]
                 z_stop = z_group[-1] + dpZ
 
-                for yi in range(0, len(y_starts), chunk_y_patches):
-                    y_group = y_starts[yi: yi + chunk_y_patches]
+                for y_group in _stride_groups(y_starts, chunk_y_patches, dpY):
                     y_start = y_group[0]
                     y_stop = y_group[-1] + dpY
 
-                    for xi in range(0, len(x_starts), chunk_x_patches):
-                        x_group = x_starts[xi: xi + chunk_x_patches]
+                    for x_group in _stride_groups(x_starts, chunk_x_patches, dpX):
                         x_start = x_group[0]
                         x_stop = x_group[-1] + dpX
 
@@ -1376,77 +1434,25 @@ def find_valid_patches(
         )
 
         # Add results with proper volume tracking - scale coordinates back to full resolution
-        for pos in valid_positions_vol:
-            if is_2d:
-                # 2D position (y, x)
-                y, x = pos
-                full_res_y = y * actual_downsample_factor
-                full_res_x = x * actual_downsample_factor
+        axis_starts = (y_starts, x_starts) if is_2d else (z_starts, y_starts, x_starts)
+        full_patch = tuple(patch_size[-spatial_ndim:])
 
-                all_valid_patches.append({
+        def _to_full_res(pos):
+            return [
+                _full_res_start(p, actual_downsample_factor, starts[-1] if starts else None, hi, size)
+                for p, starts, hi, size in zip(pos, axis_starts, full_hi, full_patch)
+            ]
+
+        for target_list, positions in (
+            (all_valid_patches, valid_positions_vol),
+            (all_bg_patches, bg_positions_vol),
+            (all_unlabeled_fg_patches, unlabeled_fg_positions_vol),
+        ):
+            for pos in positions:
+                target_list.append({
                     'volume_idx': vol_idx,
                     'volume_name': label_name,
-                    'start_pos': [full_res_y, full_res_x]
-                })
-            else:
-                # 3D position (z, y, x)
-                z, y, x = pos
-                full_res_z = z * actual_downsample_factor
-                full_res_y = y * actual_downsample_factor
-                full_res_x = x * actual_downsample_factor
-
-                all_valid_patches.append({
-                    'volume_idx': vol_idx,
-                    'volume_name': label_name,
-                    'start_pos': [full_res_z, full_res_y, full_res_x]
-                })
-
-        # Add BG-only patches if collected
-        for pos in bg_positions_vol:
-            if is_2d:
-                y, x = pos
-                full_res_y = y * actual_downsample_factor
-                full_res_x = x * actual_downsample_factor
-
-                all_bg_patches.append({
-                    'volume_idx': vol_idx,
-                    'volume_name': label_name,
-                    'start_pos': [full_res_y, full_res_x]
-                })
-            else:
-                z, y, x = pos
-                full_res_z = z * actual_downsample_factor
-                full_res_y = y * actual_downsample_factor
-                full_res_x = x * actual_downsample_factor
-
-                all_bg_patches.append({
-                    'volume_idx': vol_idx,
-                    'volume_name': label_name,
-                    'start_pos': [full_res_z, full_res_y, full_res_x]
-                })
-
-        # Add unlabeled FG patches if collected
-        for pos in unlabeled_fg_positions_vol:
-            if is_2d:
-                y, x = pos
-                full_res_y = y * actual_downsample_factor
-                full_res_x = x * actual_downsample_factor
-
-                all_unlabeled_fg_patches.append({
-                    'volume_idx': vol_idx,
-                    'volume_name': label_name,
-                    'start_pos': [full_res_y, full_res_x]
-                })
-            else:
-                z, y, x = pos
-                full_res_z = z * actual_downsample_factor
-                full_res_y = y * actual_downsample_factor
-                full_res_x = x * actual_downsample_factor
-
-                all_unlabeled_fg_patches.append({
-                    'volume_idx': vol_idx,
-                    'volume_name': label_name,
-                    'start_pos': [full_res_z, full_res_y, full_res_x]
+                    'start_pos': _to_full_res(pos),
                 })
 
         print(f"Found {len(valid_positions_vol)} valid patches in '{label_name}'")

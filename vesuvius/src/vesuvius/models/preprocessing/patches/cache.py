@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4  # 4: patch grids include an end-aligned tail start
 
 
 @dataclass(frozen=True)
