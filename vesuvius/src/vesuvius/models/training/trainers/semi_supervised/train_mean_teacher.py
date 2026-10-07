@@ -91,13 +91,13 @@ class TrainMeanTeacher(BaseTrainer):
         dataset_size = len(train_dataset)
         indices = list(range(dataset_size))
 
-        if hasattr(self.mgr, 'seed'):
-            np.random.seed(self.mgr.seed)
-            if self.mgr.verbose:
-                print(f"Using seed {self.mgr.seed} for labeled/unlabeled split")
+        # Local RandomState: same permutation as seeding the global RNG, without resetting every
+        # DDP rank's global numpy state to the same value.
+        split_rng = np.random.RandomState(self.mgr.seed) if getattr(self.mgr, 'seed', None) is not None else np.random
+        if getattr(self.mgr, 'seed', None) is not None and self.mgr.verbose:
+            print(f"Using seed {self.mgr.seed} for labeled/unlabeled split")
 
-
-        np.random.shuffle(indices)
+        split_rng.shuffle(indices)
 
         # Re-evaluate labeled/unlabeled from dataset flags to ensure supervision uses true labeled patches
         labeled_idx, unlabeled_idx = [], []
@@ -451,9 +451,10 @@ class TrainMeanTeacher(BaseTrainer):
             labeled_subset = Subset(train_dataset, self.labeled_indices)
             if self.is_distributed:
                 sampler = DistributedSampler(labeled_subset, num_replicas=self.world_size, rank=self.rank,
-                                             shuffle=True, drop_last=False)
+                                             shuffle=True, drop_last=False,
+                                             seed=int(getattr(self.mgr, 'seed', 0) or 0))
             else:
-                sampler = SubsetRandomSampler(list(range(len(labeled_subset))))
+                sampler = SubsetRandomSampler(list(range(len(labeled_subset))), generator=self._seed_generator(1))
             pin_mem = True if self.device == torch.device('cuda') or self.device.type == 'cuda' else False
             dl_kwargs = {}
             if self.mgr.train_num_dataloader_workers and self.mgr.train_num_dataloader_workers > 0:
