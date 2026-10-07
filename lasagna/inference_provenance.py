@@ -73,6 +73,43 @@ def atomic_write(path: str | Path, value: Mapping[str, Any]) -> None:
             pass
 
 
+class CheckpointMismatchError(RuntimeError):
+    """A resumed output was produced by a different checkpoint."""
+
+
+def previous_checkpoint_sha256(provenance_path: str | Path) -> str | None:
+    """Return the checkpoint sha256 recorded by an earlier run at ``provenance_path``, if any."""
+    path = Path(provenance_path)
+    if not path.is_file():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    checkpoint = value.get("checkpoint") if isinstance(value, dict) else None
+    sha = checkpoint.get("sha256") if isinstance(checkpoint, dict) else None
+    return str(sha) if sha else None
+
+
+def check_resume_checkpoint(provenance_path: str | Path, checkpoint_sha256: str, *, allow_change: bool = False) -> str | None:
+    """Refuse to resume an output written by a different checkpoint.
+
+    predict3d skips every tile whose output chunks already exist, so a rerun into an existing
+    output with another checkpoint would keep the old predictions while inference.json names the
+    new checkpoint. Returns the previous sha256 (None for a fresh output) and raises
+    CheckpointMismatchError on a mismatch unless ``allow_change`` is set.
+    """
+    previous = previous_checkpoint_sha256(provenance_path)
+    if previous is not None and previous != str(checkpoint_sha256) and not allow_change:
+        raise CheckpointMismatchError(
+            f"{Path(provenance_path).parent} was written by checkpoint sha256 {previous[:12]}..., "
+            f"but this run uses {str(checkpoint_sha256)[:12]}.... Existing output chunks would be kept as "
+            "they are. Use a new --output, delete the old output, or pass --allow-checkpoint-change to "
+            "resume anyway."
+        )
+    return previous
+
+
 def load_context(path: str | Path | None) -> dict[str, Any]:
     if path is None:
         return {}
