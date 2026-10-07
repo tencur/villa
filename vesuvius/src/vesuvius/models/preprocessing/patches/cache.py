@@ -34,10 +34,11 @@ class PatchCacheParams:
     unlabeled_fg_enabled: bool = True
     unlabeled_fg_threshold: float = 0.05
     unlabeled_fg_bbox_threshold: float = 0.15
+    ignore_label: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return {
+        config = {
             "schema_version": SCHEMA_VERSION,
             "data_path": self.data_path,
             "volume_ids": list(self.volume_ids),
@@ -50,6 +51,11 @@ class PatchCacheParams:
             "unlabeled_fg_threshold": float(self.unlabeled_fg_threshold),
             "unlabeled_fg_bbox_threshold": float(self.unlabeled_fg_bbox_threshold),
         }
+        # Only present when set, so caches written without it keep their key. BG-only patches are
+        # always collected when an ignore label is set, so bg_sampling_enabled does not change the key.
+        if self.ignore_label is not None:
+            config["ignore_label"] = self.ignore_label
+        return config
 
 
 @dataclass
@@ -82,6 +88,7 @@ def build_cache_params(
     unlabeled_fg_enabled: bool = True,
     unlabeled_fg_threshold: float = 0.05,
     unlabeled_fg_bbox_threshold: float = 0.15,
+    ignore_label: Optional[float] = None,
 ) -> PatchCacheParams:
     """Build cache params from individual arguments."""
     return PatchCacheParams(
@@ -95,6 +102,7 @@ def build_cache_params(
         unlabeled_fg_enabled=bool(unlabeled_fg_enabled),
         unlabeled_fg_threshold=float(unlabeled_fg_threshold),
         unlabeled_fg_bbox_threshold=float(unlabeled_fg_bbox_threshold),
+        ignore_label=ignore_label,
     )
 
 
@@ -227,6 +235,7 @@ def try_load_patch_cache(
     unlabeled_fg_enabled: bool = True,
     unlabeled_fg_threshold: float = 0.05,
     unlabeled_fg_bbox_threshold: float = 0.15,
+    ignore_label: Optional[float] = None,
 ) -> Optional[PatchCacheData]:
     """
     Convenience function to build cache params and load cache if it exists.
@@ -255,6 +264,8 @@ def try_load_patch_cache(
         Min fraction of non-zero image voxels.
     unlabeled_fg_bbox_threshold : float
         Min bbox coverage for image data.
+    ignore_label : Optional[float]
+        Label value that marks unannotated voxels (BG-only patches are collected when set).
 
     Returns
     -------
@@ -272,5 +283,6 @@ def try_load_patch_cache(
         unlabeled_fg_enabled=unlabeled_fg_enabled,
         unlabeled_fg_threshold=unlabeled_fg_threshold,
         unlabeled_fg_bbox_threshold=unlabeled_fg_bbox_threshold,
+        ignore_label=ignore_label,
     )
     return load_patch_cache(cache_dir, params)

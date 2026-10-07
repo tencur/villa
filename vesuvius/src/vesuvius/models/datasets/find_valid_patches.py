@@ -169,6 +169,39 @@ def zero_ignore_labels(array: np.ndarray, ignore_label: Union[int, float]) -> np
     return result
 
 
+def bg_only_patch_mask(
+    block: np.ndarray,
+    group_shape: Sequence[int],
+    patch_shape: Sequence[int],
+    ignore_label: Union[int, float],
+    valid_patch_value: Optional[Union[int, float]] = None,
+) -> np.ndarray:
+    """Per-patch BG-only test for a block of whole patches laid out on a patch-sized grid.
+
+    A patch is BG-only when it holds annotated background (0) and unannotated voxels
+    (ignore_label) but no foreground. Foreground is ``valid_patch_value`` when given,
+    otherwise any value other than 0 and ignore_label.
+
+    Returns a boolean array of shape ``group_shape``.
+    """
+    if valid_patch_value is not None:
+        fg = block == valid_patch_value
+    else:
+        fg = (block != 0) & (block != ignore_label)
+    per_patch = []
+    for mask in (fg, block == ignore_label, block == 0):
+        mask = np.ascontiguousarray(mask)
+        view = as_strided(
+            mask,
+            shape=tuple(group_shape) + tuple(patch_shape),
+            strides=tuple(st * p for st, p in zip(mask.strides, patch_shape)) + mask.strides,
+            writeable=False,
+        )
+        per_patch.append(view.reshape(tuple(group_shape) + (-1,)).any(axis=-1))
+    has_fg, has_ignore, has_bg = per_patch
+    return has_ignore & has_bg & ~has_fg
+
+
 def check_patch_chunk(
     chunk,
     sheet_label,
@@ -946,13 +979,15 @@ def find_valid_patches(
                         block_for_bg = reduce_block_to_scalar(
                             block, spatial_ndim=2, channel_selector=selector
                         )
-                        has_fg = np.any(block_for_bg == valid_patch_value)
-                        has_ignore = np.any(block_for_bg == ignore_label)
-                        has_bg = np.any(block_for_bg == 0)
-                        if has_ignore and has_bg and not has_fg:
-                            for yy in range(len(y_group)):
-                                for xx in range(len(x_group)):
-                                    bg_positions_vol.append((y_group[yy], x_group[xx]))
+                        bg_mask = bg_only_patch_mask(
+                            block_for_bg,
+                            (len(y_group), len(x_group)),
+                            (dpY, dpX),
+                            ignore_label,
+                            valid_patch_value,
+                        )
+                        for yy, xx in np.argwhere(bg_mask):
+                            bg_positions_vol.append((y_group[yy], x_group[xx]))
                     if ignore_label is not None:
                         block = zero_ignore_labels(block, ignore_label)
                     block = reduce_block_to_scalar(
@@ -1161,14 +1196,15 @@ def find_valid_patches(
                             block_for_bg = reduce_block_to_scalar(
                                 block, spatial_ndim=3, channel_selector=selector
                             )
-                            has_fg = np.any(block_for_bg == valid_patch_value)
-                            has_ignore = np.any(block_for_bg == ignore_label)
-                            has_bg = np.any(block_for_bg == 0)
-                            if has_ignore and has_bg and not has_fg:
-                                for zz in range(len(z_group)):
-                                    for yy in range(len(y_group)):
-                                        for xx in range(len(x_group)):
-                                            bg_positions_vol.append((z_group[zz], y_group[yy], x_group[xx]))
+                            bg_mask = bg_only_patch_mask(
+                                block_for_bg,
+                                (len(z_group), len(y_group), len(x_group)),
+                                (dpZ, dpY, dpX),
+                                ignore_label,
+                                valid_patch_value,
+                            )
+                            for zz, yy, xx in np.argwhere(bg_mask):
+                                bg_positions_vol.append((z_group[zz], y_group[yy], x_group[xx]))
                         if ignore_label is not None:
                             block = zero_ignore_labels(block, ignore_label)
                         block = reduce_block_to_scalar(

@@ -128,6 +128,12 @@ class ZarrDataset(Dataset):
         self.unlabeled_fg_bbox_threshold = getattr(mgr, 'unlabeled_foreground_bbox_threshold', 0.15)
         self.unlabeled_fg_volume_ids = set(getattr(mgr, 'unlabeled_foreground_volumes', []) or [])
 
+        # BG-only patch sampling (patches with annotated background and no foreground)
+        self.bg_sampling_enabled = bool(getattr(mgr, 'bg_sampling_enabled', False))
+        # Per-patch sampling weights for the trainer's WeightedRandomSampler; set only
+        # when BG-only patches are loaded.
+        self.patch_weights: Optional[List[float]] = None
+
         # Caching
         self.cache_enabled = getattr(mgr, 'cache_valid_patches', True)
         self.cache_dir = self.data_path / '.patches_cache'
@@ -662,6 +668,7 @@ class ZarrDataset(Dataset):
     def _try_load_cache(self):
         """Attempt to load patch cache using current validation params."""
         from vesuvius.models.preprocessing.patches import try_load_patch_cache
+        from vesuvius.models.preprocessing.patches.generate import resolve_ignore_label
 
         # Get valid_patch_value from target config, with dataset-level fallback
         valid_patch_value = None
@@ -675,6 +682,7 @@ class ZarrDataset(Dataset):
             valid_patch_value = dataset_cfg.get("valid_patch_value")
 
         volume_ids = [vol.volume_id for vol in self._volumes]
+        ignore_label = resolve_ignore_label(self.target_names, self.mgr)
 
         return try_load_patch_cache(
             cache_dir=self.cache_dir,
@@ -688,6 +696,7 @@ class ZarrDataset(Dataset):
             unlabeled_fg_enabled=self.unlabeled_fg_enabled,
             unlabeled_fg_threshold=self.unlabeled_fg_threshold,
             unlabeled_fg_bbox_threshold=self.unlabeled_fg_bbox_threshold,
+            ignore_label=ignore_label,
         )
 
     def _load_from_cache(self, cache_data) -> None:
@@ -707,6 +716,28 @@ class ZarrDataset(Dataset):
             ))
         self._n_labeled_fg = len(cache_data.fg_patches)
 
+        # Add BG-only patches (annotated background, no foreground). They follow the
+        # labeled FG patches: the trainer keeps indices >= n_fg out of validation and
+        # draws them through patch_weights. Only the training dataset loads them, and not
+        # together with unlabeled-FG patches: the trainer counts every index >= n_fg as BG.
+        bg_patches = cache_data.bg_patches if (self.bg_sampling_enabled and self.is_training) else []
+        if bg_patches and cache_data.unlabeled_fg_patches:
+            logger.warning(
+                "bg_sampling_enabled is ignored: %d BG-only patches are not loaded because unlabeled-foreground "
+                "patches are in use, and the trainer cannot tell the two apart.", len(bg_patches)
+            )
+            bg_patches = []
+        for entry in bg_patches:
+            vol_idx = volume_name_to_idx.get(entry.volume_name, entry.volume_idx)
+            self._patches.append(PatchInfo(
+                volume_index=vol_idx,
+                volume_name=entry.volume_name,
+                position=entry.position,
+                patch_size=self.patch_size,
+                is_unlabeled_fg=False,
+            ))
+        n_bg = len(bg_patches)
+
         # Add unlabeled FG patches
         for entry in cache_data.unlabeled_fg_patches:
             vol_idx = volume_name_to_idx.get(entry.volume_name, entry.volume_idx)
@@ -719,9 +750,20 @@ class ZarrDataset(Dataset):
             ))
         self._n_unlabeled_fg = len(cache_data.unlabeled_fg_patches)
 
+        if n_bg:
+            # Every FG patch is drawn before any BG-only patch; the trainer sizes the
+            # epoch as all FG plus bg_to_fg_ratio worth of BG, so the BG weight only
+            # needs to keep BG behind FG and uniform among itself.
+            bg_weight = 1e-6 / n_bg
+            self.patch_weights = (
+                [1.0] * self._n_labeled_fg
+                + [bg_weight] * n_bg
+                + [1.0] * self._n_unlabeled_fg
+            )
+
         logger.info(
-            "Loaded %d patches from cache (%d labeled, %d unlabeled)",
-            len(self._patches), self._n_labeled_fg, self._n_unlabeled_fg
+            "Loaded %d patches from cache (%d labeled, %d BG-only, %d unlabeled)",
+            len(self._patches), self._n_labeled_fg, n_bg, self._n_unlabeled_fg
         )
 
     def _iter_2d_positions(

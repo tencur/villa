@@ -43,6 +43,33 @@ import gc
 
 
 
+def _bg_samples_per_epoch(n_fg: int, n_bg: int, bg_to_fg_ratio: float) -> int:
+    """BG-only patches per epoch so that BG is bg_to_fg_ratio of all samples (ratio >= 1: all BG)."""
+    if bg_to_fg_ratio < 1.0:
+        n = int(n_fg * bg_to_fg_ratio / (1.0 - bg_to_fg_ratio))
+    else:
+        n = n_bg
+    return min(n, n_bg)
+
+
+class ShuffledWeightedRandomSampler(WeightedRandomSampler):
+    """WeightedRandomSampler without replacement whose epoch is returned in random order.
+
+    torch returns draws without replacement in draw order. With the dataset's FG/BG weights
+    (FG 1.0, BG a tiny share) every FG patch is drawn before any BG patch, so an epoch cut short
+    by max_steps_per_epoch would never reach the BG patches. The selected set is unchanged; only
+    its order is shuffled.
+    """
+
+    def __init__(self, weights, num_samples, generator=None):
+        super().__init__(weights=weights, num_samples=num_samples, replacement=False, generator=generator)
+
+    def __iter__(self):
+        drawn = torch.as_tensor(list(super().__iter__()), dtype=torch.long)
+        order = torch.randperm(len(drawn), generator=self.generator)
+        yield from drawn[order].tolist()
+
+
 class BaseTrainer:
     def __init__(self,
                  mgr=None,
@@ -1493,6 +1520,22 @@ class BaseTrainer:
         # Batch size semantics: in all modes, --batch-size is per-GPU (per process)
         per_device_batch = self.mgr.train_batch_size
 
+        if self.is_distributed and n_train_bg > 0 and isinstance(getattr(train_dataset, 'patch_weights', None), list):
+            # DistributedSampler cannot weight patches, so instead of training on every BG-only patch keep a
+            # fixed share of them (the same on every rank) that matches bg_to_fg_ratio.
+            n_fg_dataset = getattr(train_dataset, 'n_fg', len(train_dataset))
+            train_fg_idx = [i for i in train_indices if i < n_fg_dataset]
+            train_bg_idx = [i for i in train_indices if i >= n_fg_dataset]
+            n_keep = _bg_samples_per_epoch(
+                len(train_fg_idx), len(train_bg_idx), float(getattr(self.mgr, 'bg_to_fg_ratio', 0.5))
+            )
+            rng = np.random.RandomState(int(self.mgr.seed) if getattr(self.mgr, 'seed', None) is not None else 0)
+            kept_bg = sorted(rng.choice(train_bg_idx, size=n_keep, replace=False).tolist()) if n_keep else []
+            train_indices = train_fg_idx + kept_bg
+            n_train_bg = len(kept_bg)
+            if self.mgr.verbose:
+                print(f"DDP: keeping {n_train_bg} of {len(train_bg_idx)} BG-only patches (bg_to_fg_ratio)")
+
         # Build subset datasets so DistributedSampler can partition without overlap
         train_base = train_dataset
         val_base = val_dataset if val_dataset is not None else train_dataset
@@ -1521,17 +1564,12 @@ class BaseTrainer:
                         # If bg_to_fg_ratio=0.1, we want 10% of total samples to be BG
                         # bg_samples = n_fg * ratio / (1 - ratio)
                         bg_to_fg_ratio = float(getattr(self.mgr, 'bg_to_fg_ratio', 0.5))
-                        if bg_to_fg_ratio < 1.0:
-                            n_bg_samples = int(n_train_fg * bg_to_fg_ratio / (1.0 - bg_to_fg_ratio))
-                        else:
-                            n_bg_samples = n_train_bg  # ratio >= 1 means use all BG
-                        n_bg_samples = min(n_bg_samples, n_train_bg)  # Can't sample more BG than exists
+                        n_bg_samples = _bg_samples_per_epoch(n_train_fg, n_train_bg, bg_to_fg_ratio)
                         num_samples = n_train_fg + n_bg_samples
 
-                        train_sampler = WeightedRandomSampler(
+                        train_sampler = ShuffledWeightedRandomSampler(
                             weights=weight_tensor,
                             num_samples=num_samples,
-                            replacement=False,
                             generator=generator
                         )
                         if self.mgr.verbose:
