@@ -45,7 +45,7 @@ def load_checkpoint(checkpoint_path, model, optimizer, scheduler, mgr, device, l
 
     def _rebuild_model_from_checkpoint_config():
         nonlocal model, optimizer, optimizer_rebuilt
-        from vesuvius.models.build.build_network_from_config import NetworkFromConfig
+        from vesuvius.models.build.build_network_from_config import NetworkFromConfig, disable_eval_activations
         from vesuvius.models.training.optimizers import create_optimizer
 
         # Create a config wrapper that combines checkpoint config with mgr
@@ -69,6 +69,8 @@ def load_checkpoint(checkpoint_path, model, optimizer, scheduler, mgr, device, l
         except Exception:
             pass
         model = NetworkFromConfig(config_wrapper)
+        # Same as BaseTrainer._build_model: validation runs in eval mode and must see logits.
+        disable_eval_activations(model)
         model = model.to(device)
 
         optimizer_config = {
