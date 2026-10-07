@@ -139,8 +139,20 @@ def generate_patch_caches(
     unlabeled_fg_volume_ids = set(getattr(mgr, "unlabeled_foreground_volumes", []) or [])
 
     for vol in volumes:
-        # Label array - pass zarr Group for multi-resolution support
+        # Label array - pass zarr Group for multi-resolution support. Use the first target
+        # (in config order) that this volume is labelled for, so a volume annotated only for
+        # a later task is still scanned instead of being dropped from the cache.
         label_path = vol.label_paths.get(first_target)
+        if not (label_path and label_path.exists()):
+            for target_name in target_names[1:]:
+                candidate = vol.label_paths.get(target_name)
+                if candidate and candidate.exists():
+                    logger.info(
+                        "Volume '%s' has no '%s' label; finding patches from its '%s' label",
+                        vol.volume_id, first_target, target_name,
+                    )
+                    label_path = candidate
+                    break
         if label_path and label_path.exists():
             try:
                 label_arrays.append(zarr.open(label_path, mode="r"))

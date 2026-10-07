@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4  # 4: volumes labelled only for a later target are scanned
 
 
 @dataclass(frozen=True)
