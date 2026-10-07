@@ -141,14 +141,15 @@ class TrainFineTuneMAEUNet(BaseTrainer):
 
         ckpt_path = Path(self.pretrained_ckpt)
         if not ckpt_path.exists():
-            print(f"Warning: Pretrained MAE checkpoint not found: {ckpt_path}")
-            return state
+            # Fine-tuning without the pretrained weights is a different experiment; fail loudly.
+            raise FileNotFoundError(f"Pretrained MAE checkpoint not found: {ckpt_path}")
 
+        # vesuvius.train checkpoints carry numpy objects in model_config (e.g. must_be_divisible_by),
+        # which torch>=2.6's default weights_only=True refuses; load them like every other loader here.
         try:
-            loaded = torch.load(str(ckpt_path), map_location=self.device)
+            loaded = torch.load(str(ckpt_path), map_location=self.device, weights_only=False)
         except Exception as e:
-            print(f"Warning: Failed to load pretrained checkpoint: {e}")
-            return state
+            raise RuntimeError(f"Failed to load pretrained MAE checkpoint {ckpt_path}: {e}") from e
 
         # Resolve model state dict from common layouts
         model_state = None
