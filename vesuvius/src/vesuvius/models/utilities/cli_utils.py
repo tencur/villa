@@ -283,7 +283,7 @@ def update_config_from_args(mgr, args):
             print(f"Set learning rate scheduler: {mgr.scheduler}")
 
         if args.scheduler == "cosine_warmup":
-            if not hasattr(mgr, 'scheduler_kwargs'):
+            if not hasattr(mgr, 'scheduler_kwargs') or mgr.scheduler_kwargs is None:
                 mgr.scheduler_kwargs = {}
 
             if args.warmup_steps is not None:
