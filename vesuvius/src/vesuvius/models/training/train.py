@@ -2081,7 +2081,7 @@ class BaseTrainer:
             scheduler=scheduler,
             epoch=epoch,
             checkpoint_path=ckpt_path,
-            model_config=getattr(model, 'final_config', None),
+            model_config=getattr(self._unwrap_model(model), 'final_config', None),
             train_dataset=train_dataset,
             additional_data=self._get_additional_checkpoint_data()
         )
@@ -2638,7 +2638,7 @@ class BaseTrainer:
                 max_epoch=self.mgr.max_epoch,
                 model_ckpt_dir=model_ckpt_dir,
                 model_name=self.mgr.model_name,
-                model_config=getattr(model, 'final_config', None),
+                model_config=getattr(self._unwrap_model(model), 'final_config', None),
                 train_dataset=train_dataset
             )
 
