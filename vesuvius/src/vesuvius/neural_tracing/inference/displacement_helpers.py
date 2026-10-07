@@ -92,7 +92,7 @@ def resolve_displacement_scale(displacement_scale, model_config, inference_voxel
     return 1.0, "default"
 
 
-def predict_displacement(args, model_state, model_inputs, use_tta=None, profiler=None):
+def predict_displacement(args, model_state, model_inputs, use_tta=None, profiler=None, input_vector_channels=()):
     model = model_state["model"]
     amp_enabled = model_state["amp_enabled"]
     amp_dtype = model_state["amp_dtype"]
@@ -121,6 +121,7 @@ def predict_displacement(args, model_state, model_inputs, use_tta=None, profiler
             outlier_drop_min_keep=getattr(args, "tta_outlier_drop_min_keep", 4),
             tta_batch_size=getattr(args, "tta_batch_size", 2),
             profiler=profiler,
+            input_vector_channels=input_vector_channels,
         )
 
     return run_single_model_pass(model, model_inputs, amp_enabled, amp_dtype)

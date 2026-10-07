@@ -74,6 +74,29 @@ def _negate_flipped_displacement_channels(disp, flip_dims):
     return disp * sign
 
 
+def _negate_flipped_vector_channels(x, flip_dims, vector_channel_starts):
+    """Mirror 3-vector input fields (zyx components at channels start..start+3) along flipped axes."""
+    if not flip_dims or not vector_channel_starts:
+        return x
+    x = x.clone()
+    for start in vector_channel_starts:
+        for d in flip_dims:
+            ch = int(start) + FLIP_DIM_TO_CHANNEL[d]
+            x[:, ch] = -x[:, ch]
+    return x
+
+
+def _permute_vector_channels(x, perm, vector_channel_starts):
+    """Reorder the zyx components of 3-vector input fields to follow a spatial axis permutation."""
+    if not vector_channel_starts or tuple(perm) == (0, 1, 2):
+        return x
+    x = x.clone()
+    for start in vector_channel_starts:
+        start = int(start)
+        x[:, start:start + 3] = x[:, [start + perm[0], start + perm[1], start + perm[2]]]
+    return x
+
+
 def _reorder_rotated_displacement_channels(disp, inv_perm):
     if disp.shape[1] < 3:
         raise RuntimeError(
@@ -287,8 +310,15 @@ def run_model_tta(
     outlier_drop_min_keep=4,
     tta_batch_size=2,
     profiler=None,
+    input_vector_channels=(),
 ):
-    """Run TTA on a batch, returning merged displacement."""
+    """Run TTA on a batch, returning merged displacement.
+
+    ``input_vector_channels`` lists the first channel of every 3-vector (zyx) field in ``inputs``,
+    e.g. direction priors. Mirroring or rotating the volume moves those voxels but leaves their
+    components in the original frame unless they are transformed too; the model then sees priors
+    that point to the wrong side in half of the mirror variants.
+    """
     if inputs.ndim != 5:
         raise RuntimeError(f"Expected inputs with shape [B, C, D, H, W], got {tuple(inputs.shape)}")
     _validate_tta_merge_method(merge_method)
@@ -317,13 +347,13 @@ def run_model_tta(
                     x = inputs
                     for d in flip_dims:
                         x = x.flip(d)
+                    x = _negate_flipped_vector_channels(x, flip_dims, input_vector_channels)
                     tta_inputs.append(x)
             else:
                 transform_chunk = TTA_ROTATE3_PERMS[chunk_start:chunk_start + tta_batch_size]
                 for perm in transform_chunk:
-                    tta_inputs.append(
-                        inputs.permute(0, 1, 2 + perm[0], 2 + perm[1], 2 + perm[2])
-                    )
+                    x = inputs.permute(0, 1, 2 + perm[0], 2 + perm[1], 2 + perm[2])
+                    tta_inputs.append(_permute_vector_channels(x, perm, input_vector_channels))
             tta_inputs = torch.cat(tta_inputs, dim=0)
         with _profile_section(profiler, "iter_tta_forward_chunk"):
             disp_all = get_displacement_result(model, tta_inputs, amp_enabled, amp_dtype)
