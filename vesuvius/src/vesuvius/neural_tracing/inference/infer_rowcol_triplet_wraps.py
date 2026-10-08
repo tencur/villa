@@ -1881,7 +1881,11 @@ def _run_triplet_inference(
                 batch_np[real_batch_size:] = 0.0
 
             model_inputs = batch_cpu.to(args.device, non_blocking=use_pinned_input)
-            disp_pred = predict_displacement(args, model_state, model_inputs, use_tta=bool(args.tta), profiler=None)
+            # channels 2:5 and 5:8 are the +n / -n direction-prior vector fields (zyx components)
+            disp_pred = predict_displacement(
+                args, model_state, model_inputs, use_tta=bool(args.tta), profiler=None,
+                input_vector_channels=(2, 5),
+            )
             if disp_pred is None:
                 raise RuntimeError("Model output did not contain 'displacement'.")
             disp_pred_np = (
