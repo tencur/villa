@@ -299,9 +299,10 @@ def _collect_unlabeled_fg_from_image_only(
     def _resolve_resolution(array_obj, level_key):
         """Access resolution level from a zarr group or return array directly."""
         key = str(level_key)
+        # A bare array has no pyramid: it is full resolution and only satisfies level 0.
         if hasattr(array_obj, 'shape') and hasattr(array_obj, 'dtype'):
             if not hasattr(array_obj, 'keys'):
-                return array_obj
+                return array_obj if key == '0' else None
         try:
             candidate = array_obj[key]
             if hasattr(candidate, 'shape'):
@@ -756,10 +757,13 @@ def find_valid_patches(
             """Access resolution level from a zarr group or return array directly."""
             key = str(level_key)
 
-            # If it's already an array (not a group), return it
+            # A bare array (not a group) has no pyramid: it is the full-resolution
+            # data, so it only satisfies a request for level 0. Returning it for a
+            # coarser level would scan it with the downsampled footprint and scale
+            # its positions as if it were that level.
             if hasattr(array_obj, 'shape') and hasattr(array_obj, 'dtype'):
                 if not hasattr(array_obj, 'keys'):
-                    return array_obj
+                    return array_obj if key == '0' else None
 
             # Try accessing as group[level]
             try:
