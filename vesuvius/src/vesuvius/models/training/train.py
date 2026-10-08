@@ -1346,7 +1346,10 @@ class BaseTrainer:
         for task_name, task_config in self.mgr.targets.items():
             task_metrics = []
 
-            num_classes = task_config.get('num_classes', 2)
+            # Targets declare their class count as out_channels; num_classes is not a
+            # documented target key. A single-channel (sigmoid) head is scored as two
+            # classes, background and foreground.
+            num_classes = int(task_config.get('num_classes') or max(2, int(task_config.get('out_channels') or 2)))
             target_ignore_value = None
             for alias in ("ignore_index", "ignore_label", "ignore_value"):
                 value = task_config.get(alias)
