@@ -532,9 +532,14 @@ def main():
         if not ok:
             return 1
         if args.delete_intermediate:
-            delete_intermediate_file(zarr_path, verbose=args.verbose)
+            # The eigenanalysis writes its results into the same root group as the
+            # structure tensor, so only the structure_tensor array is intermediate.
+            delete_intermediate_file(
+                zarr_path.rstrip("/") + "/structure_tensor", verbose=args.verbose
+            )
         print("\n--- All computations completed successfully ---")
-        print(f"  - Structure tensor: {zarr_path}/structure_tensor")
+        if not args.delete_intermediate:
+            print(f"  - Structure tensor: {zarr_path}/structure_tensor")
         if not args.no_ome_out:
             print(f"  - first_component/, second_component/, normal/, confidence/ (scale '{args.ome_scale}', ds={args.ome_downsample})")
         if args.keep_eigen:
