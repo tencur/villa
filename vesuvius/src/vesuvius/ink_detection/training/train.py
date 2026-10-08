@@ -648,6 +648,14 @@ def _run_training(request: TrainingRequest) -> int:
             load_weights_only=weights_only,
             ema_model=ema_model,
         )
+        if ema_model is not None and (
+            weights_only or request.checkpoint.get("ema_model") is None
+        ):
+            # ema_model was copied from the freshly initialised model above. When the
+            # checkpoint brings no EMA state of its own, the average has to start from
+            # the weights just loaded; otherwise every saved ema_model, which inference
+            # prefers, still carries decay**steps of the random initialisation.
+            ema_model.load_state_dict(unwrapped_model.state_dict())
         suffix = (
             f" and resuming from step {start_step}"
             if not weights_only

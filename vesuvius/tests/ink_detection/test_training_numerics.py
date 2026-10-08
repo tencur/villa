@@ -515,3 +515,79 @@ def test_training_saves_its_final_state_when_the_run_ends_off_the_save_schedule(
     )
     assert final["step"] == 4
     assert final["model"]["counter"].item() == 5
+
+
+def test_ema_starts_from_weights_loaded_with_weights_only(tmp_path: Path, monkeypatch):
+    import vesuvius.ink_detection.data.dataset as dataset_module
+    import vesuvius.ink_detection.models.model as model_module
+    import vesuvius.ink_detection.training.losses as losses_module
+    import vesuvius.ink_detection.training.optimizers as optimizers_module
+    import vesuvius.ink_detection.training.samplers as samplers_module
+
+    # A published checkpoint: weights only, no EMA state (as scrollprize/ink_9um ships).
+    pretrained = tmp_path / "pretrained.pth"
+    torch.save(
+        {"model": {"value": torch.tensor(3.0), "counter": torch.tensor(0)}, "step": 9},
+        pretrained,
+    )
+    authored = _training_mapping()
+    authored.update(
+        {
+            "checkpoint": str(pretrained),
+            "weights_only": True,
+            "num_iterations": 1,
+            "save_every": 1,
+            "out_dir": str(tmp_path / "output"),
+            "mixed_precision": "no",
+            "dataloader_workers": 0,
+            "pin_memory": False,
+            "val_every": 99,
+            "log_every": 99,
+            "ema": {
+                "enabled": True,
+                "decay": 0.5,
+                "start_step": 0,
+                "update_every_steps": 1,
+                "validate": False,
+                "save_in_checkpoint": True,
+            },
+        }
+    )
+    authored["model_config"]["pretrained_backbone"] = "synthetic"
+    config_path = tmp_path / "training.json"
+    config_path.write_text(json.dumps(authored), encoding="utf-8")
+
+    monkeypatch.setattr(dataset_module, "InkDataset", _SyntheticTrainingDataset)
+    monkeypatch.setattr(
+        model_module, "make_model", lambda config: _SyntheticTrainingModel()
+    )
+    monkeypatch.setattr(
+        losses_module, "create_loss", lambda config: _SyntheticTrainingLoss()
+    )
+    monkeypatch.setattr(
+        optimizers_module,
+        "create_training_optimizer",
+        lambda model, config: torch.optim.SGD(model.parameters(), lr=0.1),
+    )
+    monkeypatch.setattr(
+        samplers_module,
+        "build_sampling_policy",
+        lambda patches, config, batch_size: SimpleNamespace(
+            batch_sampler=None, shuffle=False, sampler=None, generator=None, audit={}
+        ),
+    )
+    monkeypatch.setattr(
+        train_module,
+        "create_training_scheduler",
+        lambda optimizer, config: _RecordingScheduler(),
+    )
+
+    assert train_module._run_training(stage_training_request(config_path)) == 0
+
+    checkpoint = torch.load(
+        tmp_path / "output" / "ckpt_000001.pth", map_location="cpu", weights_only=False
+    )
+    trained = checkpoint["model"]["value"]
+    # One EMA update with decay 0.5, starting from the loaded 3.0 and not from the
+    # model's own initial 1.0.
+    torch.testing.assert_close(checkpoint["ema_model"]["value"], 0.5 * 3.0 + 0.5 * trained)
