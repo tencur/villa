@@ -7,7 +7,8 @@ from torch.utils.data import DataLoader, SubsetRandomSampler
 
 from vesuvius.models.training.train import BaseTrainer
 from vesuvius.models.training.trainers.semi_supervised import ramps
-from vesuvius.models.training.trainers.semi_supervised.two_stream_batch_sampler import TwoStreamBatchSampler
+from vesuvius.models.training.trainers.semi_supervised.two_stream_batch_sampler import TwoStreamBatchSampler, shard_for_rank
+from vesuvius.models.training.trainers.semi_supervised.ramps import mean_teacher_ema_decay
 from vesuvius.models.training.trainers.semi_supervised.splits import (
     hold_out_labeled_validation,
     validation_shares_training_source,
@@ -52,7 +53,7 @@ class TrainUncertaintyAwareMeanTeacher(BaseTrainer):
     def __init__(self, mgr=None, verbose: bool = True):
         super().__init__(mgr, verbose)
         
-        self.ema_decay = getattr(mgr, 'ema_decay', 0.99)
+        self.ema_decay = mean_teacher_ema_decay(mgr)
         self.consistency_weight = getattr(mgr, 'consistency_weight', 0.1)
         self.consistency_rampup = getattr(mgr, 'consistency_rampup', 200.0)
         self.uncertainty_threshold_start = getattr(mgr, 'uncertainty_threshold_start', 0.75)
@@ -310,8 +311,8 @@ class TrainUncertaintyAwareMeanTeacher(BaseTrainer):
             f"Batch composition: {self.labeled_batch_size} labeled + {unlabeled_batch_size} unlabeled = {self.mgr.train_batch_size} total")
         
         batch_sampler = TwoStreamBatchSampler(
-            primary_indices=self.labeled_indices,
-            secondary_indices=self.unlabeled_indices,
+            primary_indices=shard_for_rank(self.labeled_indices, self),
+            secondary_indices=shard_for_rank(self.unlabeled_indices, self),
             batch_size=self.mgr.train_batch_size,
             secondary_batch_size=unlabeled_batch_size
         )

@@ -39,3 +39,13 @@ def cosine_rampdown(current, rampdown_length):
     """Cosine rampdown from https://arxiv.org/abs/1608.03983"""
     assert 0 <= current <= rampdown_length
     return float(.5 * (np.cos(np.pi * current / rampdown_length) + 1))
+
+
+def mean_teacher_ema_decay(mgr, default=0.99):
+    """Teacher EMA decay from mean_teacher_config.ema_decay.
+
+    The flat mgr.ema_decay belongs to the generic model EMA (ema_config.decay, default 0.999), which
+    ConfigManager sets after flattening mean_teacher_config, so it cannot carry the teacher's value.
+    """
+    section = getattr(mgr, "mean_teacher_config", None) or {}
+    return float(section.get("ema_decay", default))
