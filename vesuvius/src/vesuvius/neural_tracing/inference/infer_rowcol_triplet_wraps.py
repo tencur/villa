@@ -43,6 +43,7 @@ from vesuvius.neural_tracing.inference.generate_segment_cover_bboxes import (
 )
 from vesuvius.neural_tracing.heatmap_single_point.tifxyz import save_tifxyz
 from vesuvius.tifxyz import read_tifxyz
+from vesuvius.tifxyz.upsampling import interpolate_at_points
 
 _TTA_TRANSFORM_ALIASES = {
     "mirror+rot90": "rotate3",
@@ -1600,7 +1601,76 @@ def _iter_bbox_batches(records, batch_size):
         yield start, records[start:start + batch_size]
 
 
-def _voxelize_local_surface_from_uv_points(local_points, uv_points, crop_size):
+_DENSIFY_INVALID = np.float32(-1.0e6)
+
+
+def _densify_local_lattice(grid_local, grid_valid, scale_rc):
+    """Resample a crop's lattice to about one point per voxel, as training does.
+
+    dataset_rowcol_cond builds the conditioning channel from the stored lattice upsampled by
+    1/scale with Catmull-Rom (_upsample_world_surface) before voxelizing, so the model is trained
+    on a dense sheet. This applies the same resampling at inference. Training only uses fully
+    valid lattices; here, where the 4x4 Catmull-Rom kernel touches an invalid vertex, the point is
+    interpolated bilinearly from its cell's four corners instead, and left out only when one of
+    those is invalid, so a missing vertex does not blank the cells around it.
+    """
+    scale_y, scale_x = float(scale_rc[0]), float(scale_rc[1])
+    h, w = grid_valid.shape
+    h_up = int(round(h / scale_y))
+    w_up = int(round(w / scale_x))
+    if h_up <= h and w_up <= w:
+        return None
+    rows = np.linspace(0, h - 1, max(h_up, h), dtype=np.float32)
+    cols = np.linspace(0, w - 1, max(w_up, w), dtype=np.float32)
+    query_row, query_col = np.meshgrid(rows, cols, indexing="ij")
+    src = np.where(grid_valid[..., None], grid_local, 0.0).astype(np.float32)
+    mask = np.asarray(grid_valid, dtype=bool)
+    x_up, y_up, z_up, valid_up = interpolate_at_points(
+        src[..., 2],
+        src[..., 1],
+        src[..., 0],
+        mask,
+        query_row,
+        query_col,
+        scale=(1.0, 1.0),
+        method="catmull_rom",
+        invalid_value=float(_DENSIFY_INVALID),
+    )
+    dense = np.stack([z_up, y_up, x_up], axis=-1).astype(np.float64)
+    valid_up = np.asarray(valid_up, dtype=bool)
+    if not valid_up.all():
+        # bilinear from the cell's four corners where the Catmull-Rom kernel is incomplete;
+        # the last row/column sit on vertices, which the wireframe pass draws anyway
+        qr = np.minimum(query_row, np.float32(max(h - 1, 1) - 1e-3))
+        qc = np.minimum(query_col, np.float32(max(w - 1, 1) - 1e-3))
+        r0 = np.floor(qr).astype(np.int64)
+        c0 = np.floor(qc).astype(np.int64)
+        r1 = np.minimum(r0 + 1, h - 1)
+        c1 = np.minimum(c0 + 1, w - 1)
+        corners_ok = mask[r0, c0] & mask[r0, c1] & mask[r1, c0] & mask[r1, c1]
+        fill = (~valid_up) & corners_ok
+        if fill.any():
+            tr = (qr - r0)[fill][:, None]
+            tc = (qc - c0)[fill][:, None]
+            f00 = src[r0[fill], c0[fill]]
+            f01 = src[r0[fill], c1[fill]]
+            f10 = src[r1[fill], c0[fill]]
+            f11 = src[r1[fill], c1[fill]]
+            dense[fill] = (
+                (1 - tr) * (1 - tc) * f00 + (1 - tr) * tc * f01 + tr * (1 - tc) * f10 + tr * tc * f11
+            )
+            valid_up = valid_up | fill
+    return dense, valid_up
+
+
+def _voxelize_local_surface_from_uv_points(local_points, uv_points, crop_size, scale_rc=None):
+    """Rasterize the in-crop lattice as the model's conditioning channel.
+
+    With ``scale_rc`` (the lattice's scale in the inference volume's voxels, e.g. 0.1 for a
+    tifxyz stored at 0.05 run at --volume-scale 1) the lattice is first resampled to about one
+    point per voxel, matching the dense sheet the model saw in training. Without it only the
+    lattice vertices and the lines between neighbouring vertices are drawn.
+    """
     crop_size_arr = np.asarray(crop_size, dtype=np.int64)
     vox = np.zeros(tuple(crop_size_arr.tolist()), dtype=np.float32)
     if local_points is None or uv_points is None:
@@ -1634,13 +1704,18 @@ def _voxelize_local_surface_from_uv_points(local_points, uv_points, crop_size):
     cc = (uv_arr[:, 1] - c_min).astype(np.int64, copy=False)
     grid_local[rr, cc] = local_arr
     grid_valid[rr, cc] = True
-    return voxelize_surface_grid_masked(grid_local, tuple(int(v) for v in crop_size_arr.tolist()), grid_valid).astype(
-        np.float32,
-        copy=False,
-    )
+    crop_tuple = tuple(int(v) for v in crop_size_arr.tolist())
+    vox = voxelize_surface_grid_masked(grid_local, crop_tuple, grid_valid).astype(np.float32, copy=False)
+    if scale_rc is not None:
+        densified = _densify_local_lattice(grid_local, grid_valid, scale_rc)
+        if densified is not None:
+            dense_grid, dense_valid = densified
+            dense_vox = voxelize_surface_grid_masked(dense_grid, crop_tuple, dense_valid)
+            vox = np.maximum(vox, dense_vox.astype(np.float32, copy=False))
+    return vox
 
 
-def _prepare_bbox_item(record, crop_size, world_points, uv_points, volume_arr):
+def _prepare_bbox_item(record, crop_size, world_points, uv_points, volume_arr, cond_scale_rc=None):
     bbox = tuple(record["bbox"])
     min_corner, _ = _bbox_to_min_corner_and_bounds_array(bbox)
     crop_arr = np.asarray(crop_size, dtype=np.int32)
@@ -1661,7 +1736,9 @@ def _prepare_bbox_item(record, crop_size, world_points, uv_points, volume_arr):
     world_sel = world_points[in_bounds].astype(np.float32, copy=False)
     local_sel = (world_sel - min_corner[None, :].astype(np.float32, copy=False)).astype(np.float32, copy=False)
 
-    cond_vox = _voxelize_local_surface_from_uv_points(local_sel, uv_sel, crop_size).astype(np.float32, copy=False)
+    cond_vox = _voxelize_local_surface_from_uv_points(
+        local_sel, uv_sel, crop_size, scale_rc=cond_scale_rc
+    ).astype(np.float32, copy=False)
     vol_crop = _read_volume_crop(volume_arr, crop_size, min_corner, max_corner)
     vol_crop = vol_crop.astype(np.float32, copy=False)
 
@@ -1713,13 +1790,14 @@ def _gather_batch_items(
     uv_points,
     volume_arr,
     num_workers,
+    cond_scale_rc=None,
 ):
     if len(batch_records) == 0:
         return []
     if int(num_workers) <= 1 or len(batch_records) == 1:
         items = []
         for rec in batch_records:
-            item = _prepare_bbox_item(rec, crop_size, world_points, uv_points, volume_arr)
+            item = _prepare_bbox_item(rec, crop_size, world_points, uv_points, volume_arr, cond_scale_rc)
             if item is not None:
                 items.append(item)
         return items
@@ -1733,6 +1811,7 @@ def _gather_batch_items(
             [world_points] * len(batch_records),
             [uv_points] * len(batch_records),
             [volume_arr] * len(batch_records),
+            [cond_scale_rc] * len(batch_records),
         )
         return [item for item in prepared if item is not None]
 
@@ -1778,6 +1857,7 @@ def _run_triplet_inference(
     input_normals,
     input_normals_valid,
     displacement_scale=1.0,
+    cond_scale_rc=None,
 ):
     h, w = int(shape_hw[0]), int(shape_hw[1])
     displacement_scale = float(displacement_scale)
@@ -1845,6 +1925,7 @@ def _run_triplet_inference(
                 uv_points=uv_points,
                 volume_arr=volume_arr,
                 num_workers=int(args.crop_input_workers),
+                cond_scale_rc=cond_scale_rc,
             )
 
             if len(items) == 0:
@@ -2482,6 +2563,14 @@ def _run_single_iteration(
         input_normals=input_normals,
         input_normals_valid=input_normals_valid,
         displacement_scale=displacement_scale,
+        cond_scale_rc=(
+            None
+            if stored_scale_rc is None
+            else (
+                float(stored_scale_rc[0]) * float(retarget_factor),
+                float(stored_scale_rc[1]) * float(retarget_factor),
+            )
+        ),
     )
 
     back_merged, back_merged_valid = _merge_with_original(
