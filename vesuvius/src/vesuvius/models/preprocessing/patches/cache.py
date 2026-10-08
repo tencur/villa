@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from vesuvius.ink_detection.data.patch_cache import label_asset_fingerprint
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4  # 4: patch grids include an end-aligned tail start
 
 
 @dataclass(frozen=True)

@@ -23,6 +23,7 @@ import zarr
 from torch.utils.data import Dataset
 
 from vesuvius.utils.utils import pad_or_crop_3d, pad_or_crop_2d
+from .find_valid_patches import grid_starts
 from .intensity_properties import initialize_intensity_properties
 from ..training.normalization import get_normalization
 from ..augmentation.pipelines import create_training_transforms
@@ -632,8 +633,8 @@ class ZarrDataset(Dataset):
         ph, pw = self.patch_size
 
         positions = []
-        for y in range(ry, ry + max(1, rh - ph + 1), ph):
-            for x in range(rx, rx + max(1, rw - pw + 1), pw):
+        for y in grid_starts(ry, ry + rh, ph, ph, allow_short=True):
+            for x in grid_starts(rx, rx + rw, pw, pw, allow_short=True):
                 positions.append((y, x))
         return positions
 
@@ -648,9 +649,9 @@ class ZarrDataset(Dataset):
         pd, ph, pw = self.patch_size
 
         positions = []
-        for z in range(rz, rz + max(1, rd - pd + 1), pd):
-            for y in range(ry, ry + max(1, rh - ph + 1), ph):
-                for x in range(rx, rx + max(1, rw - pw + 1), pw):
+        for z in grid_starts(rz, rz + rd, pd, pd, allow_short=True):
+            for y in grid_starts(ry, ry + rh, ph, ph, allow_short=True):
+                for x in grid_starts(rx, rx + rw, pw, pw, allow_short=True):
                     positions.append((z, y, x))
         return positions
 
@@ -826,8 +827,8 @@ class ZarrDataset(Dataset):
         ph, pw = self.patch_size
         sh, sw = stride
 
-        y_positions = list(range(0, max(1, height - ph + 1), sh))
-        x_positions = list(range(0, max(1, width - pw + 1), sw))
+        y_positions = grid_starts(0, height, ph, sh, allow_short=True)
+        x_positions = grid_starts(0, width, pw, sw, allow_short=True)
 
         return [(y, x) for y in y_positions for x in x_positions]
 
@@ -841,9 +842,9 @@ class ZarrDataset(Dataset):
         pd, ph, pw = self.patch_size
         sd, sh, sw = stride
 
-        z_positions = list(range(0, max(1, depth - pd + 1), sd))
-        y_positions = list(range(0, max(1, height - ph + 1), sh))
-        x_positions = list(range(0, max(1, width - pw + 1), sw))
+        z_positions = grid_starts(0, depth, pd, sd, allow_short=True)
+        y_positions = grid_starts(0, height, ph, sh, allow_short=True)
+        x_positions = grid_starts(0, width, pw, sw, allow_short=True)
 
         return [(z, y, x) for z in z_positions for y in y_positions for x in x_positions]
 
