@@ -83,12 +83,58 @@ def _zarray_signature(array_url: str, *, anon: bool = False) -> Optional[str]:
                 mtime_ns = int(mtime.timestamp() * 1_000_000_000) if hasattr(mtime, "timestamp") else int(mtime)
             except Exception:
                 mtime_ns = 0
-            return f"{mtime_ns}-{size}"
+            signature = f"{mtime_ns}-{size}"
+            if "://" not in array_url:
+                # `.zarray` does not change when chunks arrive later (a download that
+                # completes, a volume still being written), so on its own it would keep
+                # an index that marks those chunks empty. Stamp the chunk tree as well.
+                signature += "-" + _local_chunk_tree_stamp(array_url)
+            return signature
         if size is not None:
             return f"size={size}"
         return None
     except Exception:
         return None
+
+
+def _local_chunk_tree_stamp(array_url: str) -> str:
+    """Cheap fingerprint of which chunk files a local zarr v2 array holds.
+
+    Flat layout (``0.1.2``): the number of chunk files in the array directory.
+    Nested layout (``0/1/2``): the number of chunk directories and their newest
+    modification time, down to the directories that hold the chunk files. Those
+    are stat'ed through their parent, not listed, so the cost is one stat per
+    directory rather than one per chunk. A directory's mtime moves when an entry
+    is added or removed, which is exactly what changes the occupancy.
+
+    The sidecar cache lives in the array directory itself, so that directory's own
+    mtime is deliberately left out: writing the cache must not invalidate it.
+    An unreadable tree raises; the caller then runs without a cache.
+    """
+    base = array_url.rstrip("/")
+    with open(os.path.join(base, ".zarray"), "rb") as f:
+        zarray = json.loads(f.read())
+    depth = len(zarray.get("shape", ())) - 1 if zarray.get("dimension_separator", ".") == "/" else 0
+    count = 0
+    newest = 0
+    level = [base]
+    for remaining in range(depth, -1, -1):
+        below: List[str] = []
+        for directory in level:
+            with os.scandir(directory) as it:
+                for entry in it:
+                    if not entry.name[:1].isdigit():
+                        continue
+                    count += 1
+                    if remaining == 0 or not entry.is_dir(follow_symlinks=False):
+                        continue
+                    newest = max(newest, entry.stat(follow_symlinks=False).st_mtime_ns)
+                    if remaining > 1:
+                        below.append(entry.path)
+        level = below
+        if remaining <= 1:
+            break
+    return f"{count}.{newest}"
 
 
 def serialize_bitmap(bitmap: np.ndarray, sig: str) -> bytes:
