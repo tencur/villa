@@ -699,3 +699,60 @@ def test_fresh_run_ignores_a_best_checkpoint_record_left_in_out_dir(
     record = json.loads((out_dir / "best_checkpoint.json").read_text(encoding="utf-8"))
     assert record["value"] >= 0.0
     assert (out_dir / "best_val_loss.pth").is_file()
+
+
+def test_train_previews_are_written_without_a_validation_set(tmp_path: Path, monkeypatch):
+    import vesuvius.ink_detection.data.dataset as dataset_module
+    import vesuvius.ink_detection.models.model as model_module
+    import vesuvius.ink_detection.training.losses as losses_module
+    import vesuvius.ink_detection.training.optimizers as optimizers_module
+    import vesuvius.ink_detection.training.samplers as samplers_module
+
+    out_dir = tmp_path / "output"
+    authored = _training_mapping()
+    authored.update(
+        {
+            "num_iterations": 5,
+            "val_every": 2,
+            "save_every": 5,
+            "out_dir": str(out_dir),
+            "mixed_precision": "no",
+            "dataloader_workers": 0,
+            "pin_memory": False,
+            "log_every": 99,
+        }
+    )
+    authored["model_config"]["pretrained_backbone"] = "synthetic"
+    config_path = tmp_path / "training.json"
+    config_path.write_text(json.dumps(authored), encoding="utf-8")
+    # _SyntheticTrainingDataset has no validation patches, like the tutorial segments.
+    monkeypatch.setattr(dataset_module, "InkDataset", _SyntheticTrainingDataset)
+    monkeypatch.setattr(
+        model_module, "make_model", lambda config: _SyntheticTrainingModel()
+    )
+    monkeypatch.setattr(
+        losses_module, "create_loss", lambda config: _SyntheticTrainingLoss()
+    )
+    monkeypatch.setattr(
+        optimizers_module,
+        "create_training_optimizer",
+        lambda model, config: torch.optim.SGD(model.parameters(), lr=0.1),
+    )
+    monkeypatch.setattr(
+        samplers_module,
+        "build_sampling_policy",
+        lambda patches, config, batch_size: SimpleNamespace(
+            batch_sampler=None, shuffle=False, sampler=None, generator=None, audit={}
+        ),
+    )
+    monkeypatch.setattr(
+        train_module,
+        "create_training_scheduler",
+        lambda optimizer, config: _RecordingScheduler(),
+    )
+
+    assert train_module._run_training(stage_training_request(config_path)) == 0
+
+    previews = sorted(path.name for path in (out_dir / "train_previews").iterdir())
+    assert previews == ["train_preview_000002.tif", "train_preview_000004.tif"]
+    assert not any((out_dir / "val_previews").iterdir())
