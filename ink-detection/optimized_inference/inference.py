@@ -9,7 +9,7 @@ Key features:
 - Model-agnostic pipeline
 """
 import os
-os.environ.setdefault("OPENCV_IO_MAX_IMAGE_PIXELS", "0")
+os.environ.setdefault("OPENCV_IO_MAX_IMAGE_PIXELS", str(2**40))  # OpenCV treats "0" as a zero-pixel limit, not "unlimited"
 import gc
 import math
 import logging
