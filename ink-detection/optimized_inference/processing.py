@@ -5,7 +5,7 @@ This module contains functions that don't require PyTorch, allowing CPU-only
 tasks (prepare, reduce) to run without loading torch.
 """
 import os
-os.environ.setdefault("OPENCV_IO_MAX_IMAGE_PIXELS", "0")
+os.environ.setdefault("OPENCV_IO_MAX_IMAGE_PIXELS", str(2**40))  # OpenCV treats "0" as a zero-pixel limit, not "unlimited"
 
 import logging
 import shutil

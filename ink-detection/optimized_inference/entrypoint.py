@@ -5,7 +5,7 @@ import logging as _logging
 import warnings
 
 # Allow huge images before anything imports cv2 (and before importing inference_timesformer)
-os.environ.setdefault("OPENCV_IO_MAX_IMAGE_PIXELS", "0")
+os.environ.setdefault("OPENCV_IO_MAX_IMAGE_PIXELS", str(2**40))  # OpenCV treats "0" as a zero-pixel limit, not "unlimited"
 
 # Suppress harmless "Unclosed client session / connector" noise from aiohttp.
 # s3fs/fsspec create aiohttp sessions that aren't explicitly closed when
