@@ -93,11 +93,21 @@ def discover_segment_labels(
                 segment,
                 inklabels=None, supervision_mask=None, validation_mask=None
             )
+        validation_mask = selected.get("validation_mask")
+        if validation_mask is None and candidates_by_kind["validation_mask"]:
+            # A validation mask defines a held-out region, not a label version: keep the
+            # newest one rather than silently training on the held-out region.
+            available = candidates_by_kind["validation_mask"]
+            validation_mask = available[max(available)]
+            print(
+                f"{segment.segment_dir}: no validation mask at label version {requested}; "
+                f"using {validation_mask.name}"
+            )
         return replace(
             segment,
             inklabels=selected["inklabels"],
             supervision_mask=selected["supervision_mask"],
-            validation_mask=selected.get("validation_mask"),
+            validation_mask=validation_mask,
         )
 
     if required:
