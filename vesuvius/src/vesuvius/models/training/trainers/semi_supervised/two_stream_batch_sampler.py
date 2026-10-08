@@ -67,6 +67,20 @@ class TwoStreamBatchSampler(Sampler):
         return (len(self.primary_indices) + self.primary_batch_size - 1) // self.primary_batch_size
 
 
+def shard_for_rank(indices, trainer):
+    """Indices this process should draw from: a disjoint 1/world_size share under DDP, all of them otherwise.
+
+    TwoStreamBatchSampler is not distributed-aware; without sharding every rank would draw the same
+    permutations and train on identical batches.
+    """
+    indices = list(indices)
+    if not getattr(trainer, "is_distributed", False):
+        return indices
+    rank = int(getattr(trainer, "rank", 0) or 0)
+    world_size = max(1, int(getattr(trainer, "world_size", 1) or 1))
+    return indices[rank::world_size]
+
+
 def iterate_once(iterable):
     """Create a random permutation of the iterable"""
     return np.random.permutation(iterable)

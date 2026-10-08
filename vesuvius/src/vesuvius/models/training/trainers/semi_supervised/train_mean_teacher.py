@@ -5,7 +5,7 @@ from contextlib import nullcontext
 from torch.utils.data import DataLoader, SubsetRandomSampler
 
 from vesuvius.models.training.train import BaseTrainer
-from vesuvius.models.training.trainers.semi_supervised.two_stream_batch_sampler import TwoStreamBatchSampler
+from vesuvius.models.training.trainers.semi_supervised.two_stream_batch_sampler import TwoStreamBatchSampler, shard_for_rank
 from vesuvius.models.training.trainers.semi_supervised import ramps
 from vesuvius.models.training.trainers.semi_supervised.splits import (
     hold_out_labeled_validation,
@@ -159,8 +159,8 @@ class TrainMeanTeacher(BaseTrainer):
             f"Batch composition: {self.labeled_batch_size} labeled + {unlabeled_batch_size} unlabeled = {self.mgr.train_batch_size} total")
 
         batch_sampler = TwoStreamBatchSampler(
-            primary_indices=self.labeled_indices,
-            secondary_indices=self.unlabeled_indices,
+            primary_indices=shard_for_rank(self.labeled_indices, self),
+            secondary_indices=shard_for_rank(self.unlabeled_indices, self),
             batch_size=self.mgr.train_batch_size,
             secondary_batch_size=unlabeled_batch_size,
         )
