@@ -100,6 +100,18 @@ def generate_patch_caches(
     # Build cache params
     volume_ids = [v.volume_id for v in volumes]
     first_target = target_names[0]
+    # Each volume is scanned with the first target (in config order) it is labelled for, so a
+    # volume annotated only for a later task is still scanned instead of being dropped.
+    scan_targets = [scan_label_target(v.label_paths, target_names) for v in volumes]
+    ignore_label = resolve_ignore_label(target_names, mgr)
+    # Per volume, the ignore label of the target whose label is scanned; the cache key carries
+    # the first target's, as every volume with a first-target label is scanned with it.
+    volume_ignore_labels = [
+        resolve_ignore_label([target], mgr) if target is not None else None for target in scan_targets
+    ]
+    # Collected whenever the ignore label is known, so the cache does not depend on bg_sampling_enabled;
+    # the dataset loads them only when BG sampling is on.
+    collect_bg_only = any(value is not None for value in volume_ignore_labels)
     cache_params = build_cache_params(
         data_path=data_path,
         volume_ids=volume_ids,
@@ -113,7 +125,11 @@ def generate_patch_caches(
         unlabeled_fg_bbox_threshold=float(
             getattr(mgr, "unlabeled_foreground_bbox_threshold", 0.15)
         ),
-        label_paths=[v.label_paths.get(first_target) for v in volumes],
+        label_paths=[
+            v.label_paths.get(target) if target is not None else None
+            for v, target in zip(volumes, scan_targets)
+        ],
+        ignore_label=ignore_label,
     )
 
     # Check if cache already exists
@@ -139,9 +155,16 @@ def generate_patch_caches(
     unlabeled_fg_enabled = bool(getattr(mgr, "unlabeled_foreground_enabled", False))
     unlabeled_fg_volume_ids = set(getattr(mgr, "unlabeled_foreground_volumes", []) or [])
 
-    for vol in volumes:
-        # Label array - pass zarr Group for multi-resolution support
-        label_path = vol.label_paths.get(first_target)
+    for vol, scan_target in zip(volumes, scan_targets):
+        # Label array - pass zarr Group for multi-resolution support. Use the first target
+        # (in config order) that this volume is labelled for, so a volume annotated only for
+        # a later task is still scanned instead of being dropped from the cache.
+        label_path = vol.label_paths.get(scan_target) if scan_target is not None else None
+        if scan_target is not None and scan_target != first_target:
+            logger.info(
+                "Volume '%s' has no '%s' label; finding patches from its '%s' label",
+                vol.volume_id, first_target, scan_target,
+            )
         if label_path and label_path.exists():
             try:
                 label_arrays.append(zarr.open(label_path, mode="r"))
@@ -181,6 +204,8 @@ def generate_patch_caches(
             if cache_params.valid_patch_value is not None
             else None
         ),
+        ignore_labels=volume_ignore_labels if collect_bg_only else None,
+        collect_bg_only=collect_bg_only,
         image_arrays=image_arrays if unlabeled_fg_enabled else None,
         collect_unlabeled_fg=unlabeled_fg_enabled,
         unlabeled_fg_threshold=cache_params.unlabeled_fg_threshold,
@@ -263,6 +288,39 @@ def _resolve_valid_patch_value(
     dataset_value = dataset_cfg.get("valid_patch_value")
     if dataset_value is not None:
         return dataset_value
+    return None
+
+
+def scan_label_target(
+    label_paths: Dict[str, Optional[Path]],
+    target_names: List[str],
+) -> Optional[str]:
+    """Name of the target whose label the patch finder scans for a volume: the first target,
+    in config order, that the volume has a label for (``None`` when it has none). Used by
+    vesuvius.find_patches and by the training dataset's cache lookup, so both fingerprint the
+    same label assets.
+    """
+    for target in target_names:
+        path = label_paths.get(target)
+        if path is not None and Path(path).exists():
+            return target
+    return None
+
+
+def resolve_ignore_label(
+    target_names: List[str],
+    mgr,
+) -> Optional[Union[int, float]]:
+    """Label value that marks unannotated voxels in the first target's labels (the ones patch
+    finding scans), resolved in the same key order the trainer's loss masking uses.
+    """
+    if not target_names:
+        return None
+    info = (getattr(mgr, "targets", {}) or {}).get(target_names[0]) or {}
+    for key in ("ignore_index", "ignore_label", "ignore_value"):
+        value = info.get(key)
+        if value is not None:
+            return value
     return None
 
 

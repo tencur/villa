@@ -173,6 +173,16 @@ class ZarrDataset(Dataset):
         self.skip_patch_validation = getattr(mgr, 'skip_patch_validation', False)
         self.allow_unlabeled_data = getattr(mgr, 'allow_unlabeled_data', False)
 
+        # Fill value for a target whose label file is missing in a volume: its ignore value, so the
+        # loss skips it. Without an ignore value the zeros train as background (warned once below).
+        self._missing_label_fill = {}
+        for name in self.target_names:
+            info = self.targets.get(name) or {}
+            for alias in ("ignore_index", "ignore_label", "ignore_value"):
+                if info.get(alias) is not None:
+                    self._missing_label_fill[name] = info[alias]
+                    break
+
         # Mapping file parameters (for packed sparse zarr)
         self.allow_gap_extension = getattr(mgr, 'allow_gap_extension', True)
 
@@ -185,6 +195,12 @@ class ZarrDataset(Dataset):
         self.unlabeled_fg_threshold = getattr(mgr, 'unlabeled_foreground_threshold', 0.05)
         self.unlabeled_fg_bbox_threshold = getattr(mgr, 'unlabeled_foreground_bbox_threshold', 0.15)
         self.unlabeled_fg_volume_ids = set(getattr(mgr, 'unlabeled_foreground_volumes', []) or [])
+
+        # BG-only patch sampling (patches with annotated background and no foreground)
+        self.bg_sampling_enabled = bool(getattr(mgr, 'bg_sampling_enabled', False))
+        # Per-patch sampling weights for the trainer's WeightedRandomSampler; set only
+        # when BG-only patches are loaded.
+        self.patch_weights: Optional[List[float]] = None
 
         # Caching
         self.cache_enabled = getattr(mgr, 'cache_valid_patches', True)
@@ -265,7 +281,16 @@ class ZarrDataset(Dataset):
                         )
                     label_paths[target] = None
                     label_arrays[target] = None
-                    logger.warning("No label found for volume '%s' target '%s'", volume_id, target)
+                    if target in self._missing_label_fill:
+                        logger.warning(
+                            "No label found for volume '%s' target '%s'; it is filled with the ignore "
+                            "value %s and excluded from that target's loss",
+                            volume_id, target, self._missing_label_fill[target])
+                    else:
+                        logger.warning(
+                            "No label found for volume '%s' target '%s' and the target has no "
+                            "ignore_label: its patches will train '%s' as background (set ignore_label "
+                            "to exclude them)", volume_id, target, target)
 
             image_array = self._open_zarr(image_path)
             spatial_shape = self._get_spatial_shape(image_array)
@@ -720,6 +745,7 @@ class ZarrDataset(Dataset):
     def _try_load_cache(self):
         """Attempt to load patch cache using current validation params."""
         from vesuvius.models.preprocessing.patches import try_load_patch_cache
+        from vesuvius.models.preprocessing.patches.generate import resolve_ignore_label, scan_label_target
 
         # Get valid_patch_value from target config, with dataset-level fallback
         valid_patch_value = None
@@ -733,6 +759,9 @@ class ZarrDataset(Dataset):
             valid_patch_value = dataset_cfg.get("valid_patch_value")
 
         volume_ids = [vol.volume_id for vol in self._volumes]
+        ignore_label = resolve_ignore_label(self.target_names, self.mgr)
+        # The patch finder validates each volume against the first target it has a label for.
+        scan_targets = [scan_label_target(vol.label_paths, self.target_names) for vol in self._volumes]
 
         return try_load_patch_cache(
             cache_dir=self.cache_dir,
@@ -746,8 +775,11 @@ class ZarrDataset(Dataset):
             unlabeled_fg_enabled=self.unlabeled_fg_enabled,
             unlabeled_fg_threshold=self.unlabeled_fg_threshold,
             unlabeled_fg_bbox_threshold=self.unlabeled_fg_bbox_threshold,
-            # The patch finder validates against the first target's labels.
-            label_paths=[vol.label_paths.get(self.target_names[0]) for vol in self._volumes],
+            label_paths=[
+                vol.label_paths.get(target) if target is not None else None
+                for vol, target in zip(self._volumes, scan_targets)
+            ],
+            ignore_label=ignore_label,
         )
 
     def _cache_position_at_level(self, vol_idx: int, position) -> Optional[Tuple[int, ...]]:
@@ -794,6 +826,33 @@ class ZarrDataset(Dataset):
             n_fg += 1
         self._n_labeled_fg = n_fg
 
+        # Add BG-only patches (annotated background, no foreground). They follow the
+        # labeled FG patches: the trainer keeps indices >= n_fg out of validation and
+        # draws them through patch_weights. Only the training dataset loads them, and not
+        # together with unlabeled-FG patches: the trainer counts every index >= n_fg as BG.
+        bg_patches = cache_data.bg_patches if (self.bg_sampling_enabled and self.is_training) else []
+        if bg_patches and cache_data.unlabeled_fg_patches:
+            logger.warning(
+                "bg_sampling_enabled is ignored: %d BG-only patches are not loaded because unlabeled-foreground "
+                "patches are in use, and the trainer cannot tell the two apart.", len(bg_patches)
+            )
+            bg_patches = []
+        n_bg = 0
+        for entry in bg_patches:
+            vol_idx = volume_name_to_idx.get(entry.volume_name, entry.volume_idx)
+            position = self._cache_position_at_level(vol_idx, entry.position)
+            if (vol_idx, position) in seen:
+                continue
+            seen.add((vol_idx, position))
+            self._patches.append(PatchInfo(
+                volume_index=vol_idx,
+                volume_name=entry.volume_name,
+                position=position,
+                patch_size=self.patch_size,
+                is_unlabeled_fg=False,
+            ))
+            n_bg += 1
+
         # Add unlabeled FG patches
         n_unlabeled = 0
         for entry in cache_data.unlabeled_fg_patches:
@@ -812,9 +871,20 @@ class ZarrDataset(Dataset):
             n_unlabeled += 1
         self._n_unlabeled_fg = n_unlabeled
 
+        if n_bg:
+            # Every FG patch is drawn before any BG-only patch; the trainer sizes the
+            # epoch as all FG plus bg_to_fg_ratio worth of BG, so the BG weight only
+            # needs to keep BG behind FG and uniform among itself.
+            bg_weight = 1e-6 / n_bg
+            self.patch_weights = (
+                [1.0] * self._n_labeled_fg
+                + [bg_weight] * n_bg
+                + [1.0] * self._n_unlabeled_fg
+            )
+
         logger.info(
-            "Loaded %d patches from cache (%d labeled, %d unlabeled)",
-            len(self._patches), self._n_labeled_fg, self._n_unlabeled_fg
+            "Loaded %d patches from cache (%d labeled, %d BG-only, %d unlabeled)",
+            len(self._patches), self._n_labeled_fg, n_bg, self._n_unlabeled_fg
         )
 
     def _iter_2d_positions(
@@ -991,6 +1061,12 @@ class ZarrDataset(Dataset):
             if label_arr is not None and target_name in self._binary_label_targets:
                 _check_binary_label(label_data, target_name, vol.volume_id,
                                     self._binary_label_targets[target_name])
+            if label_arr is None:
+                # No annotation for this target in this volume (allow_unlabeled_data): mark it as
+                # ignored rather than as background, when the target has an ignore value.
+                ignore_value = self._missing_label_fill.get(target_name)
+                if ignore_value is not None:
+                    label_data = np.full_like(label_data, float(ignore_value))
             if label_arr is not None and np.count_nonzero(label_data) > 0:
                 is_unlabeled = False
             result[target_name] = torch.from_numpy(label_data[np.newaxis, ...])
