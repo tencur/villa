@@ -80,8 +80,8 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Loss functions, e.g. '[SoftDiceLoss, BCEWithLogitsLoss]' or CSV")
     grp_data.add_argument("--train-split", type=float,
                           help="Training/validation split ratio in [0,1]")
-    grp_data.add_argument("--seed", type=int, default=42,
-                          help="Random seed for split/initialization")
+    grp_data.add_argument("--seed", type=int, default=None,
+                          help="Random seed for split/initialization (default: from config or 42)")
     grp_data.add_argument("--skip-intensity-sampling", dest="skip_intensity_sampling",
                           action="store_true", default=True,
                           help="Skip intensity sampling during dataset init")
@@ -139,9 +139,9 @@ def build_parser() -> argparse.ArgumentParser:
                            help="Optimizer (see models/optimizers.py)")
     grp_optim.add_argument("--grad-accum", "--gradient-accumulation", dest="gradient_accumulation", type=int, default=None,
                            help="Number of steps to accumulate gradients before optimizer.step()")
-    grp_optim.add_argument("--grad-clip", type=float, default=12.0,
-                           help="Gradient clipping value")
-    grp_optim.add_argument("--amp-dtype", type=str, choices=["float16", "bfloat16"], default="float16",
+    grp_optim.add_argument("--grad-clip", type=float, default=None,
+                           help="Gradient clipping value (default: from config or 12.0)")
+    grp_optim.add_argument("--amp-dtype", type=str, choices=["float16", "bfloat16"], default=None,
                            help="Autocast dtype when AMP is enabled (float16 uses GradScaler; bfloat16 skips scaling)")
     grp_optim.add_argument("--no-amp", action="store_true",
                            help="Disable Automatic Mixed Precision (AMP)")

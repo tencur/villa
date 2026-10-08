@@ -213,6 +213,14 @@ class ConfigManager:
         self.optimizer = self.tr_configs.get("optimizer", "SGD")
         self.initial_lr = float(self.tr_configs.get("initial_lr", 0.01))
         self.weight_decay = float(self.tr_configs.get("weight_decay", 0.00003))
+        # Training options that the trainer reads as attributes; the CLI overrides them
+        # only when the corresponding flag is given explicitly.
+        self.scheduler = str(self.tr_configs.get("scheduler", "poly"))
+        self.scheduler_kwargs = dict(self.tr_configs.get("scheduler_kwargs", {}) or {})
+        self.gradient_clip = float(self.tr_configs.get("gradient_clip", 12.0))
+        self.amp_dtype = str(self.tr_configs.get("amp_dtype", "float16")).lower()
+        self.no_amp = bool(self.tr_configs.get("no_amp", False))
+        self.seed = int(self.tr_info.get("seed", 42))
         self.guide_loss_weight = float(self.tr_configs.get("guide_loss_weight", 0.0))
         self.guide_supervision_target = self.tr_configs.get("guide_supervision_target", None)
 
