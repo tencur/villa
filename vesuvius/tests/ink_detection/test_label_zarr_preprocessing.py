@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -96,6 +97,14 @@ def test_label_and_composite_pyramids_keep_nearest_and_mean_rounding():
     assert np.count_nonzero(nearest[1][:DEFAULT_LABEL_SLICE]) == 0
 
 
+def _newest_mtime_ns(output: Path) -> int:
+    return max(path.stat().st_mtime_ns for path in output.rglob("*") if path.is_file())
+
+
+def _set_mtime(path: Path, mtime_ns: int) -> None:
+    os.utime(path, ns=(mtime_ns, mtime_ns))
+
+
 def test_conversion_writes_v2_ome_metadata_and_preserves_skip_overwrite(tmp_path):
     label_path = tmp_path / "segment-a_inklabels.tif"
     first_YX = np.arange(35, dtype=np.uint8).reshape(5, 7)
@@ -117,6 +126,8 @@ def test_conversion_writes_v2_ome_metadata_and_preserves_skip_overwrite(tmp_path
 
     replacement_YX = np.full((5, 7), 99, dtype=np.uint8)
     tifffile.imwrite(label_path, replacement_YX)
+    # An image that is not newer than its output is skipped whatever it holds.
+    _set_mtime(label_path, _newest_mtime_ns(output) - 1_000_000_000)
     assert convert_image(label_path, levels=3)["status"] == "skipped"
     np.testing.assert_array_equal(
         zarr.open_group(output, mode="r")["0"][DEFAULT_LABEL_SLICE], first_YX
@@ -422,6 +433,49 @@ def test_label_command_rerun_counts_existing_output_as_skipped(tmp_path, capsys)
     assert main([str(tmp_path), "--workers", "1", "--levels", "1"]) == 0
     assert main([str(tmp_path), "--workers", "1", "--levels", "1"]) == 0
     assert "0 written, 1 skipped, 0 failed" in capsys.readouterr().out
+
+
+def test_label_image_edited_after_conversion_is_converted_again(tmp_path, capsys):
+    label_path = tmp_path / "segment-a_inklabels.tif"
+    tifffile.imwrite(label_path, np.zeros((5, 7), dtype=np.uint8))
+    assert main([str(tmp_path), "--workers", "1", "--levels", "2"]) == 0
+    output = label_path.with_suffix(".zarr")
+    capsys.readouterr()
+
+    # Paint the label in an image editor some time after the first conversion.
+    edited_YX = np.zeros((5, 7), dtype=np.uint8)
+    edited_YX[1:3, 2:6] = 255
+    tifffile.imwrite(label_path, edited_YX)
+    _set_mtime(label_path, _newest_mtime_ns(output) + 1_000_000_000)
+
+    assert main([str(tmp_path), "--workers", "1", "--levels", "2"]) == 0
+    printed = capsys.readouterr().out
+    assert "1 written, 0 skipped, 0 failed" in printed
+    assert "1 of the written output(s) replaced a .zarr that was older than its image" in printed
+    np.testing.assert_array_equal(
+        zarr.open_group(output, mode="r")["0"][DEFAULT_LABEL_SLICE], edited_YX
+    )
+
+    # The fresh output is newer than the image again, so the next run is a no-op.
+    _set_mtime(label_path, _newest_mtime_ns(output) - 1)
+    assert main([str(tmp_path), "--workers", "1", "--levels", "2"]) == 0
+    assert "0 written, 1 skipped, 0 failed" in capsys.readouterr().out
+
+
+def test_image_downloaded_while_its_store_was_still_arriving_is_skipped(tmp_path):
+    label_path = tmp_path / "segment-a_inklabels.tif"
+    label_YX = np.arange(35, dtype=np.uint8).reshape(5, 7)
+    tifffile.imwrite(label_path, label_YX)
+    assert convert_image(label_path, levels=2)["status"] == "written"
+    output = label_path.with_suffix(".zarr")
+
+    # A sync writes the store's metadata, then the image, then the store's chunks.
+    newest = _newest_mtime_ns(output)
+    _set_mtime(output / ".zgroup", newest - 2_000_000_000)
+    _set_mtime(output / ".zattrs", newest - 2_000_000_000)
+    _set_mtime(label_path, newest - 1_000_000_000)
+
+    assert convert_image(label_path, levels=2)["status"] == "skipped"
 
 
 def test_label_command_validates_scan_root(tmp_path):
