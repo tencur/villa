@@ -8,6 +8,10 @@ from torch.utils.data import DataLoader, SubsetRandomSampler
 from vesuvius.models.training.train import BaseTrainer
 from vesuvius.models.training.trainers.semi_supervised import ramps
 from vesuvius.models.training.trainers.semi_supervised.two_stream_batch_sampler import TwoStreamBatchSampler
+from vesuvius.models.training.trainers.semi_supervised.splits import (
+    hold_out_labeled_validation,
+    validation_shares_training_source,
+)
 
 
 # reimplemented from https://github.com/HiLab-git/SSL4MIS/blob/master/code/train_uncertainty_aware_mean_teacher_3D.py
@@ -262,6 +266,15 @@ class TrainUncertaintyAwareMeanTeacher(BaseTrainer):
                 "get_labeled_unlabeled_patch_indices() on your dataset."
             )
 
+        # Hold validation out of the labeled patches before choosing training patches, so the two never overlap
+        # when validation shares the training data (no --val-dir).
+        shares_source = validation_shares_training_source(train_dataset, val_dataset)
+        held_out_val = []
+        if shares_source:
+            labeled_idx, held_out_val = hold_out_labeled_validation(
+                labeled_idx, self.mgr.tr_val_split, min_train=self.labeled_batch_size
+            )
+
         # Determine how many labeled to use
         if self.num_labeled is not None:
             num_labeled = min(self.num_labeled, len(labeled_idx))
@@ -313,20 +326,12 @@ class TrainUncertaintyAwareMeanTeacher(BaseTrainer):
         # If an external validation dataset is provided (e.g., via --val-dir),
         # its indices are independent from the training dataset. In that case
         # evaluate over the full validation set (or a sampler can downselect later).
-        # Check if datasets share the same source (not just object identity)
-        train_path = getattr(train_dataset, 'data_path', None)
-        val_path = getattr(val_dataset, 'data_path', None)
-        same_source = (train_path == val_path) if (train_path and val_path) else False
-
-        if val_dataset is not train_dataset and not same_source:
+        if not shares_source:
             if self.mgr.verbose:
                 print("Using external validation dataset for uncertainty-aware mean teacher; evaluating on full validation set")
             val_indices = list(range(len(val_dataset)))
         else:
-            # Same source - use only labeled indices for validation
-            train_val_split = self.mgr.tr_val_split
-            val_split = int(np.floor((1 - train_val_split) * max(1, len(self.labeled_indices))))
-            val_indices = self.labeled_indices[-val_split:] if val_split > 0 else self.labeled_indices[-5:]
+            val_indices = held_out_val
 
         val_dataloader = DataLoader(
             val_dataset,
