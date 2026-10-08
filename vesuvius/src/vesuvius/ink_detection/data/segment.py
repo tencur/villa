@@ -128,6 +128,17 @@ def gather_segments(config: InkDataConfig) -> tuple[Segment, ...]:
     native_mode = config.mode in {"full_3d", "full_3d_single_wrap"}
     for dataset_idx, source in enumerate(config.active_datasets):
         allowlist = set(source.segment_names)
+        present = {
+            path.name for path in source.segments_path.iterdir() if path.is_dir()
+        }
+        missing = sorted(allowlist - present)
+        if missing:
+            # A listed segment that is not on disk would otherwise be dropped without
+            # a word and the run would train on the rest.
+            raise FileNotFoundError(
+                f"datasets[{dataset_idx}].segments names {len(missing)} segment(s) with no "
+                f"directory under {source.segments_path}: {missing}"
+            )
         for segment_dir in sorted(source.segments_path.iterdir()):
             if not segment_dir.is_dir() or segment_dir.name == "unused":
                 continue
