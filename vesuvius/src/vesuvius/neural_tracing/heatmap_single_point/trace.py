@@ -10,7 +10,8 @@ from datetime import datetime
 
 from vesuvius.neural_tracing.nets.models import make_model, load_checkpoint
 from vesuvius.neural_tracing.infer import Inference
-from vesuvius.neural_tracing.heatmap_single_point.tifxyz import save_tifxyz, get_area
+from vesuvius.neural_tracing.heatmap_single_point.tifxyz import save_tifxyz, get_area, scale_patch_for_save
+
 
 
 @click.command()
@@ -298,7 +299,7 @@ def trace(checkpoint_path, out_path, start_xyz, volume_zarr, volume_scale, steps
             if save_partial and num_vertices > 0 and num_vertices % 1000 == 0:
                 partial_uuid = f'{base_uuid}_{num_vertices//1000:03}Kvert'
                 save_tifxyz(
-                    (np.where((patch == -1).all(-1, keepdims=True), -1, patch * 2 ** volume_scale)),
+                    scale_patch_for_save(patch, volume_scale),
                     f'{out_path}',
                     partial_uuid,
                     step_size,
@@ -451,7 +452,7 @@ def trace(checkpoint_path, out_path, start_xyz, volume_zarr, volume_scale, steps
             if save_partial and num_vertices > 0 and num_vertices % 1000 == 0:
                 partial_uuid = f'{base_uuid}_r{radius:03}'
                 save_tifxyz(
-                    (np.where((patch == -1).all(-1, keepdims=True), -1, patch * 2 ** volume_scale)),
+                    scale_patch_for_save(patch, volume_scale),
                     f'{out_path}',
                     partial_uuid,
                     step_size,
@@ -582,7 +583,7 @@ def trace(checkpoint_path, out_path, start_xyz, volume_zarr, volume_scale, steps
 
         print(f'saving with uuid {base_uuid}')
         save_tifxyz(
-            patch_zyxs * 2 ** volume_scale,
+            scale_patch_for_save(patch_zyxs, volume_scale),
             f'{out_path}',
             base_uuid,
             step_size,
