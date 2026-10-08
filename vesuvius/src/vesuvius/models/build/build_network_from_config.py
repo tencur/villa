@@ -96,6 +96,41 @@ class LearnedMLPZProjection(nn.Module):
         x = logits_3d.permute(0, 1, 3, 4, 2).contiguous()  # [B, C, H, W, Z]
         return self.mlp(x).squeeze(-1)  # [B, C, H, W]
 
+def disable_eval_activations(model) -> list:
+    """Turn off the per-target output activations a train.py network applies in eval mode.
+
+    NetworkFromConfig applies each target's configured ``activation`` (sigmoid/softmax) to its
+    head output whenever the module is not in training mode. Inference stores its outputs as
+    logits and finalize_outputs/blend apply sigmoid or softmax themselves, so an activated output
+    would be activated twice and thresholds would be compared in the wrong space. Returns the
+    (target, activation) pairs that were disabled.
+    """
+    # Look through wrappers (DDP .module, torch.compile ._orig_mod, inference wrappers' .network/.model)
+    # so a wrapped network does not silently keep its activations.
+    seen = set()
+    while getattr(model, "task_activations", None) is None and id(model) not in seen:
+        seen.add(id(model))
+        inner = next(
+            (getattr(model, attr) for attr in ("module", "_orig_mod", "network", "model")
+             if isinstance(getattr(model, attr, None), torch.nn.Module)),
+            None,
+        )
+        if inner is None:
+            break
+        model = inner
+    activations = getattr(model, "task_activations", None)
+    if activations is None:
+        return []
+    disabled = []
+    for target_name in list(activations.keys()):
+        activation_fn = activations[target_name]
+        if activation_fn is None:
+            continue
+        disabled.append((target_name, type(activation_fn).__name__))
+        activations[target_name] = None
+    return disabled
+
+
 def get_activation_module(activation_str: str):
     if activation_str is None:
         activation_str = "none"
