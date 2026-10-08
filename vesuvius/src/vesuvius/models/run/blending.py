@@ -544,7 +544,9 @@ def process_chunk(chunk_info, chunk_patches, epsilon=1e-8):
         finalize_config = _worker_state.get('finalize_config')
         if finalize_config is not None:
             from vesuvius.models.run.finalize_outputs import apply_finalization
-            result, is_empty = apply_finalization(chunk_logits, num_classes, finalize_config)
+            result, is_empty = apply_finalization(
+                chunk_logits, num_classes, finalize_config, no_prediction=chunk_weights == 0
+            )
             if not is_empty:
                 # Finalized output may have different channel count than blended logits;
                 # write using slices that match the finalized shape.

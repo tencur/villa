@@ -26,7 +26,7 @@ class FinalizeConfig:
     target_info: Optional[dict] = None
 
 
-def apply_finalization(logits_np, num_classes, config: FinalizeConfig):
+def apply_finalization(logits_np, num_classes, config: FinalizeConfig, no_prediction=None):
     """
     Apply softmax + mode logic to normalized logits, producing uint8 output.
 
@@ -36,6 +36,9 @@ def apply_finalization(logits_np, num_classes, config: FinalizeConfig):
         logits_np: float32 array (C, Z, Y, X) of normalized logits
         num_classes: number of classes (C dimension)
         config: FinalizeConfig with mode/threshold/multi-task settings
+        no_prediction: optional boolean (Z, Y, X) mask of voxels that no patch covered.
+            In binary mode they are written as 0; otherwise softmax/sigmoid of their
+            zero logits gives 0.5, which is foreground at any threshold below 0.5.
 
     Returns:
         (output_uint8, is_empty) — finalized uint8 array or (None, True) for empty chunks
@@ -113,6 +116,8 @@ def apply_finalization(logits_np, num_classes, config: FinalizeConfig):
     output_np = output_data
 
     if mode == "binary":
+        if no_prediction is not None and np.any(no_prediction):
+            output_np = np.where(np.asarray(no_prediction)[np.newaxis], 0.0, output_np)
         output_np = np.clip(output_np * 255.0, 0, 255).astype(np.uint8)
     else:
         # Scale to uint8 range [0, 255]
@@ -206,7 +211,12 @@ def process_chunk(chunk_info, input_path, output_path, mode, threshold, num_clas
         is_multi_task=is_multi_task,
         target_info=target_info,
     )
-    output_np, is_empty = apply_finalization(logits_np, num_classes, config)
+    # blend_logits leaves every channel at exactly 0 where no patch contributed, for
+    # example around a --bbox region or next to patches skipped as empty.
+    no_prediction = np.all(np.asarray(logits_np) == 0, axis=0)
+    output_np, is_empty = apply_finalization(
+        logits_np, num_classes, config, no_prediction=no_prediction
+    )
 
     if is_empty:
         return {'chunk_idx': chunk_idx, 'processed_voxels': 0, 'empty': True}
