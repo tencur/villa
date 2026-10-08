@@ -40,10 +40,11 @@ class PatchCacheParams:
     # the dataset and the thresholds, which stay the same when a label is edited in place
     # or when a different target's labels are scanned for the same volumes.
     label_fingerprint: str = ""
+    ignore_label: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return {
+        config = {
             "schema_version": SCHEMA_VERSION,
             "data_path": self.data_path,
             "volume_ids": list(self.volume_ids),
@@ -57,6 +58,11 @@ class PatchCacheParams:
             "unlabeled_fg_bbox_threshold": float(self.unlabeled_fg_bbox_threshold),
             "label_fingerprint": self.label_fingerprint,
         }
+        # Only present when set, so caches written without it keep their key. BG-only patches are
+        # always collected when an ignore label is set, so bg_sampling_enabled does not change the key.
+        if self.ignore_label is not None:
+            config["ignore_label"] = self.ignore_label
+        return config
 
 
 @dataclass
@@ -90,6 +96,7 @@ def build_cache_params(
     unlabeled_fg_threshold: float = 0.05,
     unlabeled_fg_bbox_threshold: float = 0.15,
     label_paths: Sequence[str | Path | None] = (),
+    ignore_label: Optional[float] = None,
 ) -> PatchCacheParams:
     """Build cache params from individual arguments.
 
@@ -108,6 +115,7 @@ def build_cache_params(
         unlabeled_fg_threshold=float(unlabeled_fg_threshold),
         unlabeled_fg_bbox_threshold=float(unlabeled_fg_bbox_threshold),
         label_fingerprint=label_asset_fingerprint(label_paths),
+        ignore_label=ignore_label,
     )
 
 
@@ -254,6 +262,7 @@ def try_load_patch_cache(
     unlabeled_fg_threshold: float = 0.05,
     unlabeled_fg_bbox_threshold: float = 0.15,
     label_paths: Sequence[str | Path | None] = (),
+    ignore_label: Optional[float] = None,
 ) -> Optional[PatchCacheData]:
     """
     Convenience function to build cache params and load cache if it exists.
@@ -284,6 +293,8 @@ def try_load_patch_cache(
         Min bbox coverage for image data.
     label_paths : Sequence[str | Path | None]
         Label assets the patches are validated against, one per volume.
+    ignore_label : Optional[float]
+        Label value that marks unannotated voxels (BG-only patches are collected when set).
 
     Returns
     -------
@@ -302,5 +313,6 @@ def try_load_patch_cache(
         unlabeled_fg_threshold=unlabeled_fg_threshold,
         unlabeled_fg_bbox_threshold=unlabeled_fg_bbox_threshold,
         label_paths=label_paths,
+        ignore_label=ignore_label,
     )
     return load_patch_cache(cache_dir, params)

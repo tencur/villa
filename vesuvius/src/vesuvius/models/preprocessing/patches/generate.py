@@ -100,6 +100,10 @@ def generate_patch_caches(
     # Build cache params
     volume_ids = [v.volume_id for v in volumes]
     first_target = target_names[0]
+    ignore_label = resolve_ignore_label(target_names, mgr)
+    # Collected whenever the ignore label is known, so the cache does not depend on bg_sampling_enabled;
+    # the dataset loads them only when BG sampling is on.
+    collect_bg_only = ignore_label is not None
     cache_params = build_cache_params(
         data_path=data_path,
         volume_ids=volume_ids,
@@ -114,6 +118,7 @@ def generate_patch_caches(
             getattr(mgr, "unlabeled_foreground_bbox_threshold", 0.15)
         ),
         label_paths=[v.label_paths.get(first_target) for v in volumes],
+        ignore_label=ignore_label,
     )
 
     # Check if cache already exists
@@ -181,6 +186,10 @@ def generate_patch_caches(
             if cache_params.valid_patch_value is not None
             else None
         ),
+        ignore_labels=(
+            [ignore_label] * len(label_arrays) if ignore_label is not None else None
+        ),
+        collect_bg_only=collect_bg_only,
         image_arrays=image_arrays if unlabeled_fg_enabled else None,
         collect_unlabeled_fg=unlabeled_fg_enabled,
         unlabeled_fg_threshold=cache_params.unlabeled_fg_threshold,
@@ -263,6 +272,23 @@ def _resolve_valid_patch_value(
     dataset_value = dataset_cfg.get("valid_patch_value")
     if dataset_value is not None:
         return dataset_value
+    return None
+
+
+def resolve_ignore_label(
+    target_names: List[str],
+    mgr,
+) -> Optional[Union[int, float]]:
+    """Label value that marks unannotated voxels in the first target's labels (the ones patch
+    finding scans), resolved in the same key order the trainer's loss masking uses.
+    """
+    if not target_names:
+        return None
+    info = (getattr(mgr, "targets", {}) or {}).get(target_names[0]) or {}
+    for key in ("ignore_index", "ignore_label", "ignore_value"):
+        value = info.get(key)
+        if value is not None:
+            return value
     return None
 
 
