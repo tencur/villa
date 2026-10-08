@@ -9,6 +9,7 @@ os.environ.setdefault("OPENCV_IO_MAX_IMAGE_PIXELS", "0")
 
 import logging
 import shutil
+import tempfile
 import math
 import time
 from typing import List, Tuple, Optional
@@ -577,9 +578,11 @@ def reduce_partitions(
     H, W = pred_shape
     logger.info(f"Starting reduce phase: will blend {num_parts} partitions tile-by-tile (tile_size={tile_size})")
 
-    # Cache directory for partition zarrs (network filesystem -> local /tmp)
-    cache_dir = "/tmp/partition_cache"
-    os.makedirs(cache_dir, exist_ok=True)
+    # Cache directory for partition zarrs (network filesystem -> local temp dir).
+    # It is private to this call and removed once the tiles have been produced: a
+    # shared, never-cleared directory keyed only by partition number made a later
+    # reduce on the same machine blend an earlier run's partitions.
+    cache_dir = tempfile.mkdtemp(prefix="partition_cache_")
 
     # Open all partition zarr arrays once (outside the generator loop)
     logger.info(f"Caching and opening {num_parts} partition zarr arrays in parallel...")
@@ -709,7 +712,13 @@ def reduce_partitions(
                     pbar.update(1)
                     tile_idx_x += 1
 
-    return tile_generator(), pred_shape
+    def tiles_then_cleanup():
+        try:
+            yield from tile_generator()
+        finally:
+            shutil.rmtree(cache_dir, ignore_errors=True)
+
+    return tiles_then_cleanup(), pred_shape
 
 
 # ----------------------------- TIFF Writing ------------------------------
