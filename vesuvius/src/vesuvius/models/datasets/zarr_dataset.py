@@ -745,7 +745,7 @@ class ZarrDataset(Dataset):
     def _try_load_cache(self):
         """Attempt to load patch cache using current validation params."""
         from vesuvius.models.preprocessing.patches import try_load_patch_cache
-        from vesuvius.models.preprocessing.patches.generate import resolve_ignore_label
+        from vesuvius.models.preprocessing.patches.generate import resolve_ignore_label, scan_label_target
 
         # Get valid_patch_value from target config, with dataset-level fallback
         valid_patch_value = None
@@ -760,6 +760,8 @@ class ZarrDataset(Dataset):
 
         volume_ids = [vol.volume_id for vol in self._volumes]
         ignore_label = resolve_ignore_label(self.target_names, self.mgr)
+        # The patch finder validates each volume against the first target it has a label for.
+        scan_targets = [scan_label_target(vol.label_paths, self.target_names) for vol in self._volumes]
 
         return try_load_patch_cache(
             cache_dir=self.cache_dir,
@@ -773,8 +775,10 @@ class ZarrDataset(Dataset):
             unlabeled_fg_enabled=self.unlabeled_fg_enabled,
             unlabeled_fg_threshold=self.unlabeled_fg_threshold,
             unlabeled_fg_bbox_threshold=self.unlabeled_fg_bbox_threshold,
-            # The patch finder validates against the first target's labels.
-            label_paths=[vol.label_paths.get(self.target_names[0]) for vol in self._volumes],
+            label_paths=[
+                vol.label_paths.get(target) if target is not None else None
+                for vol, target in zip(self._volumes, scan_targets)
+            ],
             ignore_label=ignore_label,
         )
 
