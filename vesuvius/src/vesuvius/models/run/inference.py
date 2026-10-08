@@ -314,6 +314,16 @@ def _resolve_model_path(model_path: str, cache_dir: str, verbose: bool = False) 
     return target
 
 
+def overlap_to_step_size(overlap: float) -> float:
+    """Sliding-window step, as a fraction of the patch size, for a fractional overlap.
+
+    The dataset is given the step, not the overlap: a step of 0.25 is a quarter-patch
+    stride, which is 75% overlap. Passing ``--overlap`` through unchanged therefore ran
+    0.25 with 75% overlap and 0.75 with 25%; only 0 and 0.5 came out as requested.
+    """
+    return 1.0 - float(overlap)
+
+
 class Inferer():
     def __init__(self,
                  model_path: str = None,
@@ -410,8 +420,8 @@ class Inferer():
         if self.num_parts > 1:
             if self.part_id < 0 or self.part_id >= self.num_parts:
                 raise ValueError(f"Invalid part_id {self.part_id} for num_parts {self.num_parts}.")
-        if self.overlap < 0 or self.overlap > 1:
-            raise ValueError(f"Invalid overlap value {self.overlap}. Must be between 0 and 1.")
+        if self.overlap < 0 or self.overlap >= 1:
+            raise ValueError(f"Invalid overlap value {self.overlap}. Must be in [0, 1).")
         if self.tta_type not in ['mirroring', 'rotation']:
              raise ValueError(f"Invalid tta_type '{self.tta_type}'. Must be 'mirroring' or 'rotation'.")
         if self.max_patches is not None and self.max_patches < 1:
@@ -790,9 +800,9 @@ class Inferer():
             )
 
     def _create_dataset_and_loader(self):
-        # Use step_size instead of overlap (step_size is [0-1] representing stride as fraction of patch size)
-        # step_size of 0.5 means 50% overlap
-        
+        # VCDataset takes the sliding-window step as a fraction of the patch size, so the
+        # requested overlap is converted first (see overlap_to_step_size).
+
         # Use normalization from model checkpoint if available, otherwise use command line arg
         normalization_scheme = self.model_normalization_scheme or self.normalization_scheme
         
@@ -822,7 +832,7 @@ class Inferer():
         self.dataset = VCDataset(
             input_path=self.input,
             patch_size=self.patch_size,
-            step_size=self.overlap,
+            step_size=overlap_to_step_size(self.overlap),
             num_parts=self.num_parts,
             part_id=self.part_id,
             normalization_scheme=normalization_scheme,
