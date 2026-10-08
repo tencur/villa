@@ -12,6 +12,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from vesuvius.ink_detection.data.patch_cache import label_asset_fingerprint
+
 
 SCHEMA_VERSION = 3
 
@@ -34,6 +36,10 @@ class PatchCacheParams:
     unlabeled_fg_enabled: bool = True
     unlabeled_fg_threshold: float = 0.05
     unlabeled_fg_bbox_threshold: float = 0.15
+    # Digest of the label assets the patches were validated against. The other fields name
+    # the dataset and the thresholds, which stay the same when a label is edited in place
+    # or when a different target's labels are scanned for the same volumes.
+    label_fingerprint: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -49,6 +55,7 @@ class PatchCacheParams:
             "unlabeled_fg_enabled": bool(self.unlabeled_fg_enabled),
             "unlabeled_fg_threshold": float(self.unlabeled_fg_threshold),
             "unlabeled_fg_bbox_threshold": float(self.unlabeled_fg_bbox_threshold),
+            "label_fingerprint": self.label_fingerprint,
         }
 
 
@@ -82,8 +89,13 @@ def build_cache_params(
     unlabeled_fg_enabled: bool = True,
     unlabeled_fg_threshold: float = 0.05,
     unlabeled_fg_bbox_threshold: float = 0.15,
+    label_paths: Sequence[str | Path | None] = (),
 ) -> PatchCacheParams:
-    """Build cache params from individual arguments."""
+    """Build cache params from individual arguments.
+
+    ``label_paths`` are the label assets the patches are validated against, one per
+    volume (``None`` for a volume without labels).
+    """
     return PatchCacheParams(
         data_path=str(Path(data_path).resolve()),
         volume_ids=tuple(sorted(volume_ids)),
@@ -95,12 +107,17 @@ def build_cache_params(
         unlabeled_fg_enabled=bool(unlabeled_fg_enabled),
         unlabeled_fg_threshold=float(unlabeled_fg_threshold),
         unlabeled_fg_bbox_threshold=float(unlabeled_fg_bbox_threshold),
+        label_fingerprint=label_asset_fingerprint(label_paths),
     )
 
 
 def cache_filename(cache_params: PatchCacheParams) -> str:
     """Generate hash-based cache filename."""
     config = cache_params.to_dict()
+    # The label fingerprint is checked on load and kept out of the name, so a rescan
+    # after a label edit replaces the old file and caches written before the
+    # fingerprint existed are still found.
+    config.pop("label_fingerprint")
     digest = _hash_config(config)
     return f"patches_v{SCHEMA_VERSION}_{digest}.json"
 
@@ -140,7 +157,16 @@ def load_patch_cache(
     metadata = payload.get("metadata", {})
     cached_params = metadata.get("cache_params")
     expected_params = cache_params.to_dict()
+    expected_fingerprint = expected_params.pop("label_fingerprint")
+    cached_fingerprint = None
+    if isinstance(cached_params, dict):
+        cached_params = dict(cached_params)
+        cached_fingerprint = cached_params.pop("label_fingerprint", None)
     if cached_params != expected_params:
+        return None
+    # A cache written before the fingerprint existed carries none and is accepted as
+    # before; one that carries a fingerprint must describe the labels on disk now.
+    if cached_fingerprint is not None and cached_fingerprint != expected_fingerprint:
         return None
 
     fg = _decode_patches(payload.get("fg_patches", []))
@@ -227,6 +253,7 @@ def try_load_patch_cache(
     unlabeled_fg_enabled: bool = True,
     unlabeled_fg_threshold: float = 0.05,
     unlabeled_fg_bbox_threshold: float = 0.15,
+    label_paths: Sequence[str | Path | None] = (),
 ) -> Optional[PatchCacheData]:
     """
     Convenience function to build cache params and load cache if it exists.
@@ -255,6 +282,8 @@ def try_load_patch_cache(
         Min fraction of non-zero image voxels.
     unlabeled_fg_bbox_threshold : float
         Min bbox coverage for image data.
+    label_paths : Sequence[str | Path | None]
+        Label assets the patches are validated against, one per volume.
 
     Returns
     -------
@@ -272,5 +301,6 @@ def try_load_patch_cache(
         unlabeled_fg_enabled=unlabeled_fg_enabled,
         unlabeled_fg_threshold=unlabeled_fg_threshold,
         unlabeled_fg_bbox_threshold=unlabeled_fg_bbox_threshold,
+        label_paths=label_paths,
     )
     return load_patch_cache(cache_dir, params)

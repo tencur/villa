@@ -99,6 +99,7 @@ def generate_patch_caches(
 
     # Build cache params
     volume_ids = [v.volume_id for v in volumes]
+    first_target = target_names[0]
     cache_params = build_cache_params(
         data_path=data_path,
         volume_ids=volume_ids,
@@ -112,6 +113,7 @@ def generate_patch_caches(
         unlabeled_fg_bbox_threshold=float(
             getattr(mgr, "unlabeled_foreground_bbox_threshold", 0.15)
         ),
+        label_paths=[v.label_paths.get(first_target) for v in volumes],
     )
 
     # Check if cache already exists
@@ -134,7 +136,6 @@ def generate_patch_caches(
     label_names: List[str] = []
     image_arrays: List[Optional[zarr.Array]] = []
 
-    first_target = target_names[0]
     unlabeled_fg_enabled = bool(getattr(mgr, "unlabeled_foreground_enabled", False))
     unlabeled_fg_volume_ids = set(getattr(mgr, "unlabeled_foreground_volumes", []) or [])
 
