@@ -222,6 +222,7 @@ class CrossFrameZarrDataset(Dataset):
                     or getattr(mgr, "no_spatial", False)
                 ),
                 allowed_rotation_axes=getattr(mgr, "allowed_rotation_axes", None),
+                only_spatial_and_intensity=bool(getattr(mgr, "only_spatial_and_intensity", False)),
                 no_scaling=bool(getattr(mgr, "no_scaling_augmentation", False)),
                 skeleton_targets=skeleton_targets or None,
                 skeleton_ignore_values=skeleton_ignore_values or None,
