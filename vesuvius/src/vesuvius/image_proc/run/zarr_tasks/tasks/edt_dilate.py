@@ -11,6 +11,8 @@ from typing import Any, Callable, Iterable, Optional, Tuple
 
 import numpy as np
 import zarr
+
+from vesuvius.data.utils import create_zarr_array, open_zarr_group
 from numcodecs import Blosc
 
 from ..base import TaskConfig, ZarrTask, make_task_config
@@ -197,8 +199,9 @@ class EdtDilateTask(ZarrTask):
         # Create output zarr
         compressor = Blosc(cname="zstd", clevel=3, shuffle=Blosc.BITSHUFFLE)
 
-        output_store = zarr.open_group(self.config.output_zarr, mode="w")
-        output_arr = output_store.create_dataset(
+        output_store = open_zarr_group(self.config.output_zarr, mode="w")
+        output_arr = create_zarr_array(
+            output_store,
             self.config.resolution,
             shape=self._shape,
             chunks=self.config.chunk_size,

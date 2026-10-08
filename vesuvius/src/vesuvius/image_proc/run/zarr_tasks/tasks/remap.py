@@ -14,6 +14,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import numpy as np
 import zarr
 
+from vesuvius.data.utils import create_zarr_array, open_zarr_group
+
 from ..base import TaskConfig, ZarrTask, make_task_config
 from ..registry import register_task
 from ..utils import get_chunk_slices
@@ -183,14 +185,14 @@ class RemapTask(ZarrTask):
             print("Output already exists, opening in r+ mode")
         else:
             print("Creating output zarr")
-            zarr.open(self.config.output_zarr, mode="w")
+            open_zarr_group(self.config.output_zarr, mode="w")
 
     def run(self) -> None:
         """Execute remap for all levels."""
         self.prepare()
 
         input_store = zarr.open(self.config.input_zarr, mode="r")
-        output_store = zarr.open(self.config.output_zarr, mode="a")
+        output_store = open_zarr_group(self.config.output_zarr, mode="a")
 
         for level in self._levels_to_process:
             print(f"\n{'='*60}")
@@ -206,7 +208,8 @@ class RemapTask(ZarrTask):
 
             # Create output array with same properties
             if str(level) not in output_store:
-                output_store.create_dataset(
+                create_zarr_array(
+                    output_store,
                     str(level),
                     shape=input_arr.shape,
                     chunks=input_arr.chunks,
