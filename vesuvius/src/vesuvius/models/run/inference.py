@@ -220,6 +220,17 @@ def _select_evenly_spaced_middle_indices(candidate_indices, limit):
     return [candidates[offset] for offset in selected_offsets]
 
 
+
+def map_train_zscore_scheme(scheme):
+    """Volume normalization for a vesuvius.train checkpoint's scheme.
+
+    vesuvius.train's 'zscore' (ZScoreNormalization -> normalize_zscore) uses each patch's own
+    mean and std, whatever intensity properties the checkpoint also stores (they are sampled with
+    --no-skip-intensity-sampling or given in the config, and only 'ct' uses them). Predict must
+    do the same, so 'zscore' is always per-patch here.
+    """
+    return 'instance_zscore' if scheme == 'zscore' else scheme
+
 class _InferenceDeepSupervisionWrapper(torch.nn.Module):
     """Collapse multi-scale train-time outputs to highest-resolution inference outputs."""
 
@@ -823,17 +834,9 @@ class Inferer():
         
         # Handle train.py model normalization scheme mapping
         if self.model_normalization_scheme and normalization_scheme == 'zscore':
-            # This is a train.py model with 'zscore' normalization
-            if self.model_intensity_properties and 'mean' in self.model_intensity_properties and 'std' in self.model_intensity_properties:
-                # We have intensity properties, use global_zscore
-                normalization_scheme = 'global_zscore'
-                if self.verbose:
-                    print("Mapped 'zscore' to 'global_zscore' (intensity properties available)")
-            else:
-                # No intensity properties, use instance_zscore
-                normalization_scheme = 'instance_zscore'
-                if self.verbose:
-                    print("Mapped 'zscore' to 'instance_zscore' (no intensity properties)")
+            normalization_scheme = map_train_zscore_scheme(normalization_scheme)
+            if self.verbose:
+                print("Mapped 'zscore' to 'instance_zscore' (vesuvius.train normalizes each patch by its own mean/std)")
         
         # Extract global normalization parameters if using global_zscore
         global_mean = None
