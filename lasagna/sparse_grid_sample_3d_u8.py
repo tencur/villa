@@ -28,6 +28,8 @@ def sparse_grid_sample_3d_u8(
     grid: torch.Tensor,
     offset: torch.Tensor,
     inv_scale: torch.Tensor,
+    pair_a: int = -1,
+    pair_b: int = -1,
 ) -> torch.Tensor:
     """Trilinear 3D grid_sample from sparse chunk cache.
 
@@ -37,8 +39,10 @@ def sparse_grid_sample_3d_u8(
         grid: (D, H, W, 3) float32 CUDA — fullres coordinates (x, y, z)
         offset: (3,) float32 CUDA — origin in fullres coords
         inv_scale: (3,) float32 CUDA — 1.0 / spacing per axis
+        pair_a, pair_b: chunk channel indices of the hemisphere-encoded (nx, ny)
+            normal pair, blended sign-aware (see normal_sampling.py); -1 = none
 
     Returns:
         (C, D, H, W) uint8 CUDA
     """
-    return _get_module().sparse_grid_sample_3d_u8(chunk_table, C, grid, offset, inv_scale)
+    return _get_module().sparse_grid_sample_3d_u8(chunk_table, C, grid, offset, inv_scale, int(pair_a), int(pair_b))

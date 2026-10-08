@@ -9,6 +9,8 @@ import numpy as np
 import tensorstore as ts
 import torch
 
+from normal_sampling import kernel_normal_pair
+
 _CHUNK_SIZE = 32
 _PADDED = _CHUNK_SIZE + 2
 
@@ -205,6 +207,8 @@ class TensorStoreSparseChunkGroupCache:
     def grid_sample(self, xyz_fullres: torch.Tensor, origin: torch.Tensor,
                     inv_scale: torch.Tensor, *, diff: bool = False,
                     context: str = "") -> torch.Tensor:
+        # (nx, ny) pair is blended sign-aware by the kernels; see normal_sampling.py.
+        pair_a, pair_b = kernel_normal_pair(self.channels)
         try:
             check_enabled = os.environ.get("LASAGNA_CHECK_SPARSE_CACHE", "0") != "0"
             if check_enabled:
@@ -218,11 +222,13 @@ class TensorStoreSparseChunkGroupCache:
                 from sparse_grid_sample_3d_u8_diff import sparse_grid_sample_3d_u8_diff
                 out = sparse_grid_sample_3d_u8_diff(
                     self.chunk_table, self.n_channels, xyz_fullres, origin, inv_scale,
+                    pair_a, pair_b,
                 )
             else:
                 from sparse_grid_sample_3d_u8 import sparse_grid_sample_3d_u8
                 out = sparse_grid_sample_3d_u8(
                     self.chunk_table, self.n_channels, xyz_fullres, origin, inv_scale,
+                    pair_a, pair_b,
                 )
             if check_enabled:
                 try:

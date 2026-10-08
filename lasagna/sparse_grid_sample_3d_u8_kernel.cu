@@ -1,11 +1,13 @@
 #include <torch/extension.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include "sparse_normal_pair.cuh"
 
 __global__ void sparse_grid_sample_3d_u8_kernel(
     const long long* __restrict__ chunk_table,  // (cZ, cY, cX) contiguous — device ptrs (0=empty)
     int cZ, int cY, int cX,
     int C,                                       // channels per chunk
+    int pair_a, int pair_b,                      // chunk channel indices of (nx, ny), -1 = none
     const float* __restrict__ grid,              // (D, H, W, 3) possibly non-contiguous
     int N,                                       // D*H*W
     long long grid_stride_d,
@@ -97,6 +99,7 @@ __global__ void sparse_grid_sample_3d_u8_kernel(
     const int S_y = 34;
 
     for (int c = 0; c < C; c++) {
+        if (c == pair_a || c == pair_b) continue;  // normal pair: sampled sign-aware below
         const uint8_t* ch = chunk + (long long)c * 34 * 34 * 34;
 
         float val = 0.0f;
@@ -114,6 +117,18 @@ __global__ void sparse_grid_sample_3d_u8_kernel(
         if (ival > 255) ival = 255;
         out[(long long)c * N + n] = (uint8_t)ival;
     }
+
+    // Hemisphere-encoded normal pair (nx, ny): align corner signs before blending.
+    // See sparse_normal_pair.cuh / normal_sampling.py.
+    if (pair_a >= 0 && pair_b >= 0) {
+        const float w[8] = {w000, w100, w010, w110, w001, w101, w011, w111};
+        float ca[8], cb[8], sgn[8], flip;
+        lasagna_normal_pair_load_corners(chunk + (long long)pair_a * 34 * 34 * 34, ix0, ix1, iy0, iy1, iz0, iz1, ca);
+        lasagna_normal_pair_load_corners(chunk + (long long)pair_b * 34 * 34 * 34, ix0, ix1, iy0, iy1, iz0, iz1, cb);
+        lasagna_normal_pair_signs(ca, cb, w, sgn, &flip);
+        out[(long long)pair_a * N + n] = lasagna_round_u8(lasagna_normal_pair_blend(ca, w, sgn, flip));
+        out[(long long)pair_b * N + n] = lasagna_round_u8(lasagna_normal_pair_blend(cb, w, sgn, flip));
+    }
 }
 
 
@@ -122,7 +137,9 @@ torch::Tensor sparse_grid_sample_3d_u8(
     int C,                       // channels per chunk
     torch::Tensor grid,          // (D, H, W, 3) float32 cuda — fullres coords
     torch::Tensor offset,        // (3,) float32 cuda
-    torch::Tensor inv_scale      // (3,) float32 cuda
+    torch::Tensor inv_scale,     // (3,) float32 cuda
+    int pair_a,                  // chunk channel index of nx, or -1
+    int pair_b                   // chunk channel index of ny, or -1
 ) {
     TORCH_CHECK(chunk_table.is_cuda() && chunk_table.dtype() == torch::kInt64,
                 "chunk_table must be CUDA int64");
@@ -132,6 +149,9 @@ torch::Tensor sparse_grid_sample_3d_u8(
     TORCH_CHECK(grid.dim() == 4 && grid.size(3) == 3, "grid must be (D, H, W, 3)");
     TORCH_CHECK(offset.is_cuda() && offset.numel() == 3, "offset must be CUDA (3,)");
     TORCH_CHECK(inv_scale.is_cuda() && inv_scale.numel() == 3, "inv_scale must be CUDA (3,)");
+    TORCH_CHECK((pair_a < 0 && pair_b < 0) ||
+                (pair_a >= 0 && pair_b >= 0 && pair_a < C && pair_b < C && pair_a != pair_b),
+                "pair_a/pair_b must both be -1 or distinct channel indices < C");
 
     int cZ = chunk_table.size(0);
     int cY = chunk_table.size(1);
@@ -153,7 +173,7 @@ torch::Tensor sparse_grid_sample_3d_u8(
 
     sparse_grid_sample_3d_u8_kernel<<<blocks, threads>>>(
         (long long*)chunk_table.data_ptr<int64_t>(),
-        cZ, cY, cX, C,
+        cZ, cY, cX, C, pair_a, pair_b,
         grid.data_ptr<float>(),
         N,
         grid_stride_d, grid_stride_h, grid_stride_w, grid_stride_c,
@@ -169,5 +189,5 @@ torch::Tensor sparse_grid_sample_3d_u8(
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("sparse_grid_sample_3d_u8", &sparse_grid_sample_3d_u8,
-          "Trilinear 3D grid_sample from sparse chunk cache (CUDA)");
+          "Trilinear 3D grid_sample from sparse chunk cache (CUDA); (pair_a, pair_b) = (nx, ny) channels blended sign-aware");
 }

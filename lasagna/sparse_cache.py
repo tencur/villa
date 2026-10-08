@@ -10,6 +10,8 @@ import numpy as np
 import torch
 import zarr
 
+from normal_sampling import kernel_normal_pair
+
 if TYPE_CHECKING:
     pass
 
@@ -214,7 +216,11 @@ class SparseChunkGroupCache:
         """Sample from sparse chunk cache.
 
         Returns (C, D, H, W) — uint8 for non-diff, float32 for diff.
+
+        When this group holds both "nx" and "ny", the kernels blend that pair
+        sign-aware (hemisphere-encoded codes; see normal_sampling.py).
         """
+        pair_a, pair_b = kernel_normal_pair(self.channels)
         check_enabled = os.environ.get("LASAGNA_CHECK_SPARSE_CACHE", "0") != "0"
         if check_enabled:
             self._check_sample_chunks_loaded(
@@ -227,11 +233,13 @@ class SparseChunkGroupCache:
             from sparse_grid_sample_3d_u8_diff import sparse_grid_sample_3d_u8_diff
             out = sparse_grid_sample_3d_u8_diff(
                 self.chunk_table, self.n_channels, xyz_fullres, origin, inv_scale,
+                pair_a, pair_b,
             )
         else:
             from sparse_grid_sample_3d_u8 import sparse_grid_sample_3d_u8
             out = sparse_grid_sample_3d_u8(
                 self.chunk_table, self.n_channels, xyz_fullres, origin, inv_scale,
+                pair_a, pair_b,
             )
         if check_enabled:
             try:

@@ -14,6 +14,7 @@ import torch.nn.functional as F
 import zarr
 
 from lasagna_volume import ChannelGroup, LasagnaVolume
+from normal_sampling import decode_codes, sample_normal_codes, sign_aware_enabled
 
 # --- Chunk sampling statistics ---
 CHUNK_STATS_ENABLED = False
@@ -522,6 +523,44 @@ class FitData3D:
 			return self._grid_sample_cuda(xyz_sample, diff=diff, channels=channels)
 		return self._grid_sample_torch(xyz_sample, channels=channels)
 
+	def _sample_normal_pair(
+		self,
+		xyz_fullres: torch.Tensor,
+		*,
+		channels: set[str] | None,
+		round_to_u8: bool,
+	) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+		"""Sign-aware trilinear sample of the dense (nx, ny) code volumes.
+
+		The codes are hemisphere-encoded ((nx, ny) * sign(nz)), so neighbouring
+		voxels of one sheet can carry opposite signs; blending them per channel
+		cancels the in-plane part (see normal_sampling.py).  Returns decoded
+		(nx, ny) as (1, 1, D, H, W) float32 (None for a channel not requested),
+		or (None, None) when the pair is unavailable or sign-aware sampling is
+		disabled, in which case the caller falls back to per-channel sampling.
+		"""
+		if self.nx is None or self.ny is None or not sign_aware_enabled():
+			return None, None
+		if channels is not None and "nx" not in channels and "ny" not in channels:
+			return None, None
+		sp = self._spacing_for("nx")
+		origin = torch.tensor(self.origin_fullres, dtype=xyz_fullres.dtype, device=xyz_fullres.device)
+		spacing = torch.tensor(sp, dtype=xyz_fullres.dtype, device=xyz_fullres.device)
+		local = (xyz_fullres - origin) / spacing
+		nx_c, ny_c = sample_normal_codes(
+			self.nx.squeeze(0).squeeze(0),
+			self.ny.squeeze(0).squeeze(0),
+			local,
+			round_to_u8=round_to_u8,
+		)
+		nx_out = decode_codes(nx_c).unsqueeze(0).unsqueeze(0)
+		ny_out = decode_codes(ny_c).unsqueeze(0).unsqueeze(0)
+		if channels is not None and "nx" not in channels:
+			nx_out = None
+		if channels is not None and "ny" not in channels:
+			ny_out = None
+		return nx_out, ny_out
+
 	def _grid_sample_cuda(
 		self,
 		xyz_fullres: torch.Tensor,
@@ -564,11 +603,17 @@ class FitData3D:
 				raw = raw.float()
 			return decode(raw).unsqueeze(0)  # (1, 1, D, H, W) float32
 
+		# (nx, ny) are sampled together, sign-aware; the uint8 kernel rounds, so mirror that.
+		nx_s, ny_s = self._sample_normal_pair(xyz_fullres, channels=_want, round_to_u8=not diff)
+		if nx_s is None and ny_s is None:
+			nx_s = _gs(self.nx, lambda t: (t - 128.0) / 127.0, "nx")
+			ny_s = _gs(self.ny, lambda t: (t - 128.0) / 127.0, "ny")
+
 		return FitData3D(
 			cos=_gs(self.cos, lambda t: t / 255.0, "cos"),
 			grad_mag=_gs(self.grad_mag, lambda t: t / self.grad_mag_scale, "grad_mag"),
-			nx=_gs(self.nx, lambda t: (t - 128.0) / 127.0, "nx"),
-			ny=_gs(self.ny, lambda t: (t - 128.0) / 127.0, "ny"),
+			nx=nx_s,
+			ny=ny_s,
 			pred_dt=_gs(self.pred_dt, lambda t: t, "pred_dt"),
 			corr_points=self.corr_points,
 			winding_volume=self.winding_volume,
@@ -680,7 +725,8 @@ class FitData3D:
 			for i, ch_name in selected:
 				raw[ch_name] = sampled[i:i+1].unsqueeze(0)  # (1, 1, D, H, W)
 
-		# Decode per-channel (same as _grid_sample_cuda)
+		# Decode per-channel (same as _grid_sample_cuda).  When a group holds both nx and ny the
+		# sparse kernels already blended that pair sign-aware (sparse_cache.grid_sample).
 		cos_t = raw.get("cos")
 		if cos_t is not None:
 			cos_t = cos_t / 255.0
@@ -745,11 +791,17 @@ class FitData3D:
 			t_f = decode(t.float())
 			return F.grid_sample(t_f, grid_5d, mode="bilinear", padding_mode="zeros", align_corners=True)
 
+		# (nx, ny) are sampled together, sign-aware (same trilinear/zero-padding semantics).
+		nx_s, ny_s = self._sample_normal_pair(xyz_fullres, channels=_want, round_to_u8=False)
+		if nx_s is None and ny_s is None:
+			nx_s = _gs(self.nx, lambda t: (t - 128.0) / 127.0, "nx")
+			ny_s = _gs(self.ny, lambda t: (t - 128.0) / 127.0, "ny")
+
 		return FitData3D(
 			cos=_gs(self.cos, lambda t: t / 255.0, "cos"),
 			grad_mag=_gs(self.grad_mag, lambda t: t / self.grad_mag_scale, "grad_mag"),
-			nx=_gs(self.nx, lambda t: (t - 128.0) / 127.0, "nx"),
-			ny=_gs(self.ny, lambda t: (t - 128.0) / 127.0, "ny"),
+			nx=nx_s,
+			ny=ny_s,
 			pred_dt=_gs(self.pred_dt, lambda t: t, "pred_dt"),
 			corr_points=self.corr_points,
 			winding_volume=self.winding_volume,
