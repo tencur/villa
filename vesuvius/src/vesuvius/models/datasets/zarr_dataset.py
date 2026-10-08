@@ -56,6 +56,56 @@ class PatchInfo:
     safe_boundary: Optional[Tuple[int, ...]] = None
 
 
+
+# Losses that expect a 0/1 target for a single-channel head. A target is checked if any of its losses is
+# one of these: a 0/255 label breaks them whatever else the target is trained with.
+_BINARY_TARGET_LOSSES = {
+    "BCEWithLogitsLoss",
+    "nnUNet_DC_and_BCE_loss",
+    "MemoryEfficientSoftDiceLoss",
+}
+
+
+def _target_ignore_values(info: dict) -> set:
+    """Ignore values the trainer applies to this target: the target-level alias it uses, plus any
+    ``ignore_index`` set on an individual loss entry (directly or under ``kwargs``)."""
+    values = set()
+    for alias in ("ignore_index", "ignore_label", "ignore_value"):
+        if info.get(alias) is not None:
+            values.add(info[alias])
+            break
+    for loss in info.get("losses") or []:
+        if isinstance(loss, dict):
+            for source in (loss, loss.get("kwargs") or {}):
+                if source.get("ignore_index") is not None:
+                    values.add(source["ignore_index"])
+    return values
+
+
+def _is_binary_label_target(info: dict) -> bool:
+    channels = info.get("out_channels", info.get("channels"))
+    losses = info.get("losses") or []
+    names = [loss.get("name") for loss in losses if isinstance(loss, dict)]
+    return channels == 1 and any(name in _BINARY_TARGET_LOSSES for name in names)
+
+
+def _check_binary_label(label: np.ndarray, target_name: str, volume_id: str, ignore_values=()) -> None:
+    """Fail loudly when a binary target's label holds values outside [0, 1] (other than an ignore value).
+
+    Soft targets in (0, 1) are valid for BCEWithLogits / soft Dice; a 0/255 mask is not.
+    """
+    bad = (label < 0) | (label > 1)
+    for ignore_value in ignore_values:
+        bad &= label != ignore_value
+    if bad.any():
+        found = np.unique(label[bad])[:5].tolist()
+        raise ValueError(
+            f"Target '{target_name}' (volume '{volume_id}') is trained with binary losses, so its labels "
+            f"must lie in [0, 1] (or be the ignore value), but the label contains {found}. Store the label as "
+            f"0/1, e.g. convert a 0/255 mask with (label > 0)."
+        )
+
+
 class ZarrDataset(Dataset):
     """
     PyTorch Dataset for 3D volumetric data stored in OME-Zarr format.
@@ -105,6 +155,13 @@ class ZarrDataset(Dataset):
         ]
         if not self.target_names:
             self.target_names = ['ink']  # Default target
+        # Single-channel targets trained with a binary loss need 0/1 labels (plus the ignore
+        # value). A grayscale mask such as 0/255 would otherwise reach the loss as a target of 255.
+        self._binary_label_targets = {
+            name: _target_ignore_values(self.targets.get(name) or {})
+            for name in self.target_names
+            if _is_binary_label_target(self.targets.get(name) or {})
+        }
 
         # Determine 2D vs 3D
         self.is_2d = len(self.patch_size) == 2
@@ -929,6 +986,9 @@ class ZarrDataset(Dataset):
         for target_name in self.target_names:
             label_arr = vol.label_arrays.get(target_name)
             label_data = load_array(label_arr)
+            if label_arr is not None and target_name in self._binary_label_targets:
+                _check_binary_label(label_data, target_name, vol.volume_id,
+                                    self._binary_label_targets[target_name])
             if label_arr is not None and np.count_nonzero(label_data) > 0:
                 is_unlabeled = False
             result[target_name] = torch.from_numpy(label_data[np.newaxis, ...])
