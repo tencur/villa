@@ -1444,12 +1444,13 @@ class BaseTrainer:
             fg_indices = list(range(n_fg))
             bg_indices = list(range(n_fg, dataset_size))
 
-            if hasattr(self.mgr, 'seed'):
-                np.random.seed(self.mgr.seed)
-                if self.mgr.verbose:
-                    print(f"Using seed {self.mgr.seed} for train/val split")
+            # A local RandomState gives the same permutation as seeding the global RNG did, without
+            # resetting every rank's global numpy state to the same value (augmentations draw from it).
+            split_rng = np.random.RandomState(self.mgr.seed) if getattr(self.mgr, 'seed', None) is not None else np.random
+            if getattr(self.mgr, 'seed', None) is not None and self.mgr.verbose:
+                print(f"Using seed {self.mgr.seed} for train/val split")
 
-            np.random.shuffle(fg_indices)
+            split_rng.shuffle(fg_indices)
 
             train_val_split = self.mgr.tr_val_split
             split = int(np.floor(train_val_split * len(fg_indices)))
@@ -1512,7 +1513,8 @@ class BaseTrainer:
 
         if self.is_distributed:
             train_sampler = DistributedSampler(
-                train_subset, num_replicas=self.world_size, rank=self.rank, shuffle=True, drop_last=False
+                train_subset, num_replicas=self.world_size, rank=self.rank, shuffle=True, drop_last=False,
+                seed=int(getattr(self.mgr, 'seed', 0) or 0),
             )
             # For validation we only run on rank 0; sampler unused there, but keep a sequential sampler for completeness
             val_sampler = None
@@ -1549,12 +1551,12 @@ class BaseTrainer:
                             bg_percent = 100.0 * n_bg_samples / num_samples if num_samples > 0 else 0
                             print(f"Using WeightedRandomSampler: {n_train_fg} FG + {n_bg_samples} BG = {num_samples} samples/epoch ({bg_percent:.1f}% BG)")
                     else:
-                        train_sampler = SubsetRandomSampler(list(range(len(train_subset))))
+                        train_sampler = SubsetRandomSampler(list(range(len(train_subset))), generator=self._seed_generator(1))
                 else:
-                    train_sampler = SubsetRandomSampler(list(range(len(train_subset))))
+                    train_sampler = SubsetRandomSampler(list(range(len(train_subset))), generator=self._seed_generator(1))
             else:
-                train_sampler = SubsetRandomSampler(list(range(len(train_subset))))
-            val_sampler = SubsetRandomSampler(list(range(len(val_subset))))
+                train_sampler = SubsetRandomSampler(list(range(len(train_subset))), generator=self._seed_generator(1))
+            val_sampler = SubsetRandomSampler(list(range(len(val_subset))), generator=self._seed_generator(2))
 
         pin_mem = True if self.device.type == 'cuda' else False
         dl_kwargs = {}
@@ -1568,6 +1570,7 @@ class BaseTrainer:
             shuffle=False,
             pin_memory=pin_mem,
             num_workers=self.mgr.train_num_dataloader_workers,
+            generator=self._seed_generator(3),
             **dl_kwargs
         )
 
@@ -1579,12 +1582,50 @@ class BaseTrainer:
             shuffle=False,
             pin_memory=pin_mem,
             num_workers=self.mgr.train_num_dataloader_workers,
+            generator=self._seed_generator(4),
             **dl_kwargs
         )
 
         return train_dataloader, val_dataloader, train_indices, val_indices
 
+    def _derived_seed(self, purpose):
+        """Seed for one random stream, derived from (mgr.seed, rank, purpose) so that streams of
+        different seeds, ranks and purposes do not coincide (seed 42 + offset 1 is not seed 43)."""
+        rank = int(getattr(self, 'rank', 0) or 0)
+        state = np.random.SeedSequence([int(self.mgr.seed), rank, int(purpose)]).generate_state(1)
+        return int(state[0])
+
+    def _seed_generator(self, offset=0):
+        """A torch.Generator seeded from mgr.seed (None when no seed is configured).
+
+        Derived per rank so DDP processes draw different worker seeds (augmentations); the
+        DistributedSampler, which must agree across ranks, takes the plain seed instead.
+        """
+        if getattr(self.mgr, 'seed', None) is None:
+            return None
+        generator = torch.Generator()
+        generator.manual_seed(self._derived_seed(1 + int(offset)))
+        return generator
+
+    def _seed_everything(self):
+        """Seed python, numpy and torch from mgr.seed so a run with the same seed is repeatable.
+
+        Model initialization, the training sampler order and the DataLoader worker seeds (which
+        seed each worker's augmentation RNGs) all draw from these generators. Resuming restarts
+        the samplers from the seed, so a resumed run is repeatable but not identical to an
+        uninterrupted one.
+        """
+        if getattr(self.mgr, 'seed', None) is None:
+            print("Warning: no seed configured (mgr.seed is None); this run is not reproducible")
+            return
+        import random
+        seed = self._derived_seed(0)
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+
     def _initialize_training(self):
+        self._seed_everything()
         if detect_s3_paths(self.mgr):
             print("\nDetected S3 paths in configuration")
             setup_multiprocessing_for_s3()

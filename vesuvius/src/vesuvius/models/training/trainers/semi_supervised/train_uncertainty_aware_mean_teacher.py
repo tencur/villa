@@ -238,12 +238,13 @@ class TrainUncertaintyAwareMeanTeacher(BaseTrainer):
         dataset_size = len(train_dataset)
         indices = list(range(dataset_size))
         
-        if hasattr(self.mgr, 'seed'):
-            np.random.seed(self.mgr.seed)
-            if self.mgr.verbose:
-                print(f"Using seed {self.mgr.seed} for labeled/unlabeled split")
-        
-        np.random.shuffle(indices)
+        # Local RandomState: same permutation as seeding the global RNG, without resetting every
+        # DDP rank's global numpy state to the same value.
+        split_rng = np.random.RandomState(self.mgr.seed) if getattr(self.mgr, 'seed', None) is not None else np.random
+        if getattr(self.mgr, 'seed', None) is not None and self.mgr.verbose:
+            print(f"Using seed {self.mgr.seed} for labeled/unlabeled split")
+
+        split_rng.shuffle(indices)
         
         # Determine labeled/unlabeled indices using fast path (file-level)
         labeled_idx, unlabeled_idx = [], []
