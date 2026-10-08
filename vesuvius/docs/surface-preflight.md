@@ -30,6 +30,12 @@ falls back to array `0` or the only array in the group. A volume path that
 selects a concrete array inside a `.zarr` group is resolved through that group
 and must select its base dataset. Standalone single-array stores remain valid.
 
+An `s3://` volume is opened with the configured AWS credentials first. If that
+fails because credentials are missing, expired, or rejected, the command
+retries with unsigned requests, so `s3://vesuvius-challenge-open-data/...`
+volume URIs copied from the open-data catalog work on a machine with no AWS
+setup. A private bucket still reports the original credential error.
+
 The command checks:
 
 - required TIFXYZ files, metadata, coordinate shapes, and optional mask
