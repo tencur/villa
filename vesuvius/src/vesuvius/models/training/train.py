@@ -16,7 +16,7 @@ from torch.utils.data.distributed import DistributedSampler
 from vesuvius.models.utils import InitWeights_He
 from vesuvius.models.datasets import ZarrDataset
 from vesuvius.utils.plotting import save_debug, convert_slice_to_bgr, _compute_display_value_range, add_text_label
-from vesuvius.models.build.build_network_from_config import NetworkFromConfig
+from vesuvius.models.build.build_network_from_config import NetworkFromConfig, disable_eval_activations
 
 from vesuvius.models.training.loss.losses import _create_loss
 from vesuvius.models.training.loss.nnunet_losses import DeepSupervisionWrapper
@@ -194,6 +194,14 @@ class BaseTrainer:
             }
 
         model = NetworkFromConfig(self.mgr)
+        # Validation runs the model in eval mode, where NetworkFromConfig would apply each
+        # target's configured activation; the loss functions and metrics expect logits.
+        disabled = disable_eval_activations(model)
+        if disabled and getattr(self.mgr, "verbose", False):
+            print(
+                "Validation outputs are logits; eval-time activations disabled for: "
+                + ", ".join(f"{name} ({act})" for name, act in disabled)
+            )
         return model
 
     def _get_additional_checkpoint_data(self):
