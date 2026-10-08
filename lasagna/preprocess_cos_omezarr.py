@@ -2710,6 +2710,11 @@ def main_predict3d(argv: list[str] | None = None) -> int:
 	p.add_argument("--input", required=True, help="Input zarr array (3D ZYX).")
 	p.add_argument("--output", required=True, help="Output .lasagna.json path.")
 	p.add_argument("--unet-checkpoint", required=True, help="3D UNet checkpoint (.pt).")
+	p.add_argument(
+		"--allow-checkpoint-change", action="store_true",
+		help="Resume into an existing output even if it was written by a different checkpoint "
+		"(existing tiles are kept, not recomputed).",
+	)
 	p.add_argument("--tile-size", type=int, default=None,
 		help="Inference tile size (default: checkpoint patch_size).")
 	p.add_argument("--overlap", type=int, default=64, help="Tile overlap in voxels.")
@@ -2829,6 +2834,7 @@ def main_predict3d(argv: list[str] | None = None) -> int:
 		from inference_provenance import (
 			atomic_write as write_provenance,
 			base_document,
+			check_resume_checkpoint,
 			code_commit,
 			finalize_document,
 			load_context,
@@ -2838,6 +2844,7 @@ def main_predict3d(argv: list[str] | None = None) -> int:
 		from lasagna.inference_provenance import (
 			atomic_write as write_provenance,
 			base_document,
+			check_resume_checkpoint,
 			code_commit,
 			finalize_document,
 			load_context,
@@ -2896,6 +2903,16 @@ def main_predict3d(argv: list[str] | None = None) -> int:
 		},
 		"manifest": output_manifest.name,
 	})
+	# An existing output is resumed tile by tile, so it must come from the same checkpoint.
+	previous_sha = check_resume_checkpoint(
+		provenance_path, provenance["checkpoint"]["sha256"],
+		allow_change=bool(args.allow_checkpoint_change),
+	)
+	if previous_sha is not None and previous_sha != provenance["checkpoint"]["sha256"]:
+		print(
+			f"[predict3d] WARNING: resuming output written by checkpoint {previous_sha[:12]}... "
+			f"with a different checkpoint; existing tiles are kept.", flush=True,
+		)
 	write_provenance(provenance_path, provenance)
 	live_cache = None
 	try:
