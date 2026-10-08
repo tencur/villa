@@ -188,8 +188,24 @@ class SpatialPatchGrid:
                 bbox['y_max'] > chunk['y_start'] and bbox['y_min'] < chunk['y_end'] and
                 bbox['x_max'] > chunk['x_start'] and bbox['x_min'] < chunk['x_end'])
 
-    def _load_aggregate_bbox_cache(self, parent_dir):
-        """Load aggregate bbox cache from parent directory."""
+    @staticmethod
+    def _modified_time(path):
+        """Modification time of a local file or S3 object, in seconds since the epoch."""
+        if path.startswith('s3://'):
+            info = fsspec.filesystem('s3', anon=False).info(path)
+            modified = info.get('LastModified') or info.get('last_modified')
+            return modified.timestamp() if hasattr(modified, 'timestamp') else float(modified)
+        return os.path.getmtime(path)
+
+    def _load_aggregate_bbox_cache(self, parent_dir, part_files=None):
+        """Load aggregate bbox cache from parent directory.
+
+        The cache is ignored when a part's coordinates were written after it: running
+        vesuvius.predict again into the same folder (another --bbox, another volume)
+        recreates the coordinate stores, and boxes cached for the earlier run would
+        otherwise decide which parts take part in every later blend. A part that had
+        no patches is cached as None and was then left out entirely.
+        """
         cache_path = os.path.join(parent_dir, '.bbox_cache.json')
         try:
             if parent_dir.startswith('s3://'):
@@ -200,6 +216,12 @@ class SpatialPatchGrid:
                     return None
                 with open(cache_path, 'r') as f:
                     cache_data = json.load(f)
+            if part_files:
+                cache_time = self._modified_time(cache_path)
+                for files in part_files.values():
+                    coords_meta = os.path.join(files['coordinates'], '.zarray')
+                    if self._modified_time(coords_meta) > cache_time:
+                        return None
             return {int(k): v for k, v in cache_data.items()}
         except Exception as e:
             warnings.warn(f"Failed to load bbox cache from {cache_path}: {e}")
@@ -238,7 +260,7 @@ class SpatialPatchGrid:
         print(f"\n--- Building Spatial Patch Index ---")
 
         # Step 1: Load bboxes from aggregate cache or compute them
-        cached_bboxes = self._load_aggregate_bbox_cache(parent_dir)
+        cached_bboxes = self._load_aggregate_bbox_cache(parent_dir, part_files)
         if cached_bboxes and all(pid in cached_bboxes for pid in part_ids):
             print(f"  Using cached bounding boxes for {len(part_ids)} parts")
             self.bbox_cache = {pid: cached_bboxes[pid] for pid in part_ids}
