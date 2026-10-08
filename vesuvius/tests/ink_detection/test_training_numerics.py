@@ -515,3 +515,244 @@ def test_training_saves_its_final_state_when_the_run_ends_off_the_save_schedule(
     )
     assert final["step"] == 4
     assert final["model"]["counter"].item() == 5
+
+
+def test_ema_starts_from_weights_loaded_with_weights_only(tmp_path: Path, monkeypatch):
+    import vesuvius.ink_detection.data.dataset as dataset_module
+    import vesuvius.ink_detection.models.model as model_module
+    import vesuvius.ink_detection.training.losses as losses_module
+    import vesuvius.ink_detection.training.optimizers as optimizers_module
+    import vesuvius.ink_detection.training.samplers as samplers_module
+
+    # A published checkpoint: weights only, no EMA state (as scrollprize/ink_9um ships).
+    pretrained = tmp_path / "pretrained.pth"
+    torch.save(
+        {"model": {"value": torch.tensor(3.0), "counter": torch.tensor(0)}, "step": 9},
+        pretrained,
+    )
+    authored = _training_mapping()
+    authored.update(
+        {
+            "checkpoint": str(pretrained),
+            "weights_only": True,
+            "num_iterations": 1,
+            "save_every": 1,
+            "out_dir": str(tmp_path / "output"),
+            "mixed_precision": "no",
+            "dataloader_workers": 0,
+            "pin_memory": False,
+            "val_every": 99,
+            "log_every": 99,
+            "ema": {
+                "enabled": True,
+                "decay": 0.5,
+                "start_step": 0,
+                "update_every_steps": 1,
+                "validate": False,
+                "save_in_checkpoint": True,
+            },
+        }
+    )
+    authored["model_config"]["pretrained_backbone"] = "synthetic"
+    config_path = tmp_path / "training.json"
+    config_path.write_text(json.dumps(authored), encoding="utf-8")
+
+    monkeypatch.setattr(dataset_module, "InkDataset", _SyntheticTrainingDataset)
+    monkeypatch.setattr(
+        model_module, "make_model", lambda config: _SyntheticTrainingModel()
+    )
+    monkeypatch.setattr(
+        losses_module, "create_loss", lambda config: _SyntheticTrainingLoss()
+    )
+    monkeypatch.setattr(
+        optimizers_module,
+        "create_training_optimizer",
+        lambda model, config: torch.optim.SGD(model.parameters(), lr=0.1),
+    )
+    monkeypatch.setattr(
+        samplers_module,
+        "build_sampling_policy",
+        lambda patches, config, batch_size: SimpleNamespace(
+            batch_sampler=None, shuffle=False, sampler=None, generator=None, audit={}
+        ),
+    )
+    monkeypatch.setattr(
+        train_module,
+        "create_training_scheduler",
+        lambda optimizer, config: _RecordingScheduler(),
+    )
+
+    assert train_module._run_training(stage_training_request(config_path)) == 0
+
+    checkpoint = torch.load(
+        tmp_path / "output" / "ckpt_000001.pth", map_location="cpu", weights_only=False
+    )
+    trained = checkpoint["model"]["value"]
+    # One EMA update with decay 0.5, starting from the loaded 3.0 and not from the
+    # model's own initial 1.0.
+    torch.testing.assert_close(checkpoint["ema_model"]["value"], 0.5 * 3.0 + 0.5 * trained)
+
+
+class _ResumableScheduler(_RecordingScheduler):
+    def load_state_dict(self, state: dict[str, int]) -> None:
+        self.steps = state["steps"]
+
+
+class _SyntheticValidatedDataset(_SyntheticTrainingDataset):
+    def __init__(self, config, *, do_augmentations, patches=None, segments=None):
+        super().__init__(
+            config, do_augmentations=do_augmentations, patches=patches, segments=segments
+        )
+        self.validation_patches = [0]
+
+
+def _run_synthetic_validated_training(tmp_path: Path, monkeypatch, **overrides) -> Path:
+    import vesuvius.ink_detection.data.dataset as dataset_module
+    import vesuvius.ink_detection.models.model as model_module
+    import vesuvius.ink_detection.training.losses as losses_module
+    import vesuvius.ink_detection.training.optimizers as optimizers_module
+    import vesuvius.ink_detection.training.samplers as samplers_module
+
+    out_dir = tmp_path / "output"
+    authored = _training_mapping()
+    authored.update(
+        {
+            "out_dir": str(out_dir),
+            "mixed_precision": "no",
+            "dataloader_workers": 0,
+            "pin_memory": False,
+            "val_every": 1,
+            "val_steps": 1,
+            "val_preview_batches": 0,
+            "save_every": 2,
+            "log_every": 99,
+            "best_checkpoint_metric": "val_loss",
+        }
+    )
+    authored.update(overrides)
+    authored["model_config"]["pretrained_backbone"] = "synthetic"
+    config_path = tmp_path / f"training_{authored['num_iterations']}.json"
+    config_path.write_text(json.dumps(authored), encoding="utf-8")
+    monkeypatch.setattr(dataset_module, "InkDataset", _SyntheticValidatedDataset)
+    monkeypatch.setattr(
+        model_module, "make_model", lambda config: _SyntheticTrainingModel()
+    )
+    monkeypatch.setattr(
+        losses_module, "create_loss", lambda config: _SyntheticTrainingLoss()
+    )
+    monkeypatch.setattr(
+        optimizers_module,
+        "create_training_optimizer",
+        lambda model, config: torch.optim.SGD(model.parameters(), lr=0.1),
+    )
+    monkeypatch.setattr(
+        samplers_module,
+        "build_sampling_policy",
+        lambda patches, config, batch_size: SimpleNamespace(
+            batch_sampler=None, shuffle=False, sampler=None, generator=None, audit={}
+        ),
+    )
+    monkeypatch.setattr(
+        train_module,
+        "create_training_scheduler",
+        lambda optimizer, config: _ResumableScheduler(),
+    )
+    assert train_module._run_training(stage_training_request(config_path)) == 0
+    return out_dir
+
+
+def test_resumed_run_keeps_a_better_best_checkpoint(tmp_path: Path, monkeypatch):
+    out_dir = _run_synthetic_validated_training(tmp_path, monkeypatch, num_iterations=2)
+    record_path = out_dir / "best_checkpoint.json"
+    first = json.loads(record_path.read_text(encoding="utf-8"))
+    assert first["metric"] == "val_loss"
+
+    # The earlier run's best was better than anything the resumed run can score.
+    record_path.write_text(
+        json.dumps({**first, "value": -1.0, "step": 0}), encoding="utf-8"
+    )
+    best_before = (out_dir / "best_val_loss.pth").read_bytes()
+
+    _run_synthetic_validated_training(
+        tmp_path,
+        monkeypatch,
+        num_iterations=3,
+        checkpoint=str(out_dir / "ckpt_000002.pth"),
+    )
+
+    assert json.loads(record_path.read_text(encoding="utf-8"))["value"] == -1.0
+    assert (out_dir / "best_val_loss.pth").read_bytes() == best_before
+
+
+def test_fresh_run_ignores_a_best_checkpoint_record_left_in_out_dir(
+    tmp_path: Path, monkeypatch
+):
+    out_dir = tmp_path / "output"
+    out_dir.mkdir()
+    (out_dir / "best_checkpoint.json").write_text(
+        json.dumps({"checkpoint": "best_val_loss.pth", "metric": "val_loss", "value": -1.0, "step": 0}),
+        encoding="utf-8",
+    )
+
+    _run_synthetic_validated_training(tmp_path, monkeypatch, num_iterations=2)
+
+    record = json.loads((out_dir / "best_checkpoint.json").read_text(encoding="utf-8"))
+    assert record["value"] >= 0.0
+    assert (out_dir / "best_val_loss.pth").is_file()
+
+
+def test_train_previews_are_written_without_a_validation_set(tmp_path: Path, monkeypatch):
+    import vesuvius.ink_detection.data.dataset as dataset_module
+    import vesuvius.ink_detection.models.model as model_module
+    import vesuvius.ink_detection.training.losses as losses_module
+    import vesuvius.ink_detection.training.optimizers as optimizers_module
+    import vesuvius.ink_detection.training.samplers as samplers_module
+
+    out_dir = tmp_path / "output"
+    authored = _training_mapping()
+    authored.update(
+        {
+            "num_iterations": 5,
+            "val_every": 2,
+            "save_every": 5,
+            "out_dir": str(out_dir),
+            "mixed_precision": "no",
+            "dataloader_workers": 0,
+            "pin_memory": False,
+            "log_every": 99,
+        }
+    )
+    authored["model_config"]["pretrained_backbone"] = "synthetic"
+    config_path = tmp_path / "training.json"
+    config_path.write_text(json.dumps(authored), encoding="utf-8")
+    # _SyntheticTrainingDataset has no validation patches, like the tutorial segments.
+    monkeypatch.setattr(dataset_module, "InkDataset", _SyntheticTrainingDataset)
+    monkeypatch.setattr(
+        model_module, "make_model", lambda config: _SyntheticTrainingModel()
+    )
+    monkeypatch.setattr(
+        losses_module, "create_loss", lambda config: _SyntheticTrainingLoss()
+    )
+    monkeypatch.setattr(
+        optimizers_module,
+        "create_training_optimizer",
+        lambda model, config: torch.optim.SGD(model.parameters(), lr=0.1),
+    )
+    monkeypatch.setattr(
+        samplers_module,
+        "build_sampling_policy",
+        lambda patches, config, batch_size: SimpleNamespace(
+            batch_sampler=None, shuffle=False, sampler=None, generator=None, audit={}
+        ),
+    )
+    monkeypatch.setattr(
+        train_module,
+        "create_training_scheduler",
+        lambda optimizer, config: _RecordingScheduler(),
+    )
+
+    assert train_module._run_training(stage_training_request(config_path)) == 0
+
+    previews = sorted(path.name for path in (out_dir / "train_previews").iterdir())
+    assert previews == ["train_preview_000002.tif", "train_preview_000004.tif"]
+    assert not any((out_dir / "val_previews").iterdir())

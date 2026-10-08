@@ -214,6 +214,19 @@ def apply_dynamic_label_substitution(batch, generator, *, kind: str) -> None:
         batch.pop(key, None)
 
 
+def recorded_best_checkpoint_value(out_dir: Path, metric: str | None) -> float | None:
+    """Return the best validation value an earlier run recorded in ``out_dir`` for ``metric``."""
+
+    path = Path(out_dir) / "best_checkpoint.json"
+    if metric is None or not path.is_file():
+        return None
+    with path.open(encoding="utf-8") as stream:
+        recorded = json.load(stream)
+    if recorded.get("metric") != metric:
+        return None
+    return float(recorded["value"])
+
+
 def should_save_checkpoint(
     step: int, *, save_every: int, save_iterations: Sequence[int]
 ) -> bool:
@@ -648,6 +661,14 @@ def _run_training(request: TrainingRequest) -> int:
             load_weights_only=weights_only,
             ema_model=ema_model,
         )
+        if ema_model is not None and (
+            weights_only or request.checkpoint.get("ema_model") is None
+        ):
+            # ema_model was copied from the freshly initialised model above. When the
+            # checkpoint brings no EMA state of its own, the average has to start from
+            # the weights just loaded; otherwise every saved ema_model, which inference
+            # prefers, still carries decay**steps of the random initialisation.
+            ema_model.load_state_dict(unwrapped_model.state_dict())
         suffix = (
             f" and resuming from step {start_step}"
             if not weights_only
@@ -725,7 +746,13 @@ def _run_training(request: TrainingRequest) -> int:
     train_iterator = iter(train_loader)
     latest_val_loss = None
     latest_ema_val_loss = None
-    best_checkpoint_value = None
+    # A resumed run continues the comparison where the earlier run left it. Starting from
+    # None would let its first validation replace best_*.pth whatever it scores.
+    best_checkpoint_value = (
+        recorded_best_checkpoint_value(config.out_dir, config.best_checkpoint_metric)
+        if start_step > 0
+        else None
+    )
     confusion_metric = Confusion()
     progress = tqdm(
         range(start_step, config.num_iterations),
@@ -969,6 +996,11 @@ def _run_training(request: TrainingRequest) -> int:
                 if accelerator.is_main_process:
                     latest_val_loss = None
                     latest_ema_val_loss = None
+                    # Without a validation set there is nothing to validate, but the
+                    # train preview collected above is still due.
+                    train_preview.save(
+                        Path(train_preview_dir) / f"train_preview_{step:06}.tif"
+                    )
                 save_checkpoint(step)
                 continue
             preview_indices = set(
