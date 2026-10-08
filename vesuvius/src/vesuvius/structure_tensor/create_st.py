@@ -51,7 +51,7 @@ class StructureTensorInferer(Inferer, nn.Module):
     def __init__(self,
                  *args,
                  sigma: float = 1.0,
-                 smooth_components: bool = False,
+                 smooth_components: bool = True,
                  volume: int = None,  # Add volume attribute
                  step_size: float = 1.0,
                  **kwargs):
@@ -78,6 +78,11 @@ class StructureTensorInferer(Inferer, nn.Module):
         self.do_tta = False
         self.sigma = sigma
         self.smooth_components = smooth_components
+        if smooth_components and int(3 * float(sigma)) < 1:
+            # The Gaussian radius is int(3 * sigma): below sigma = 1/3 the integration kernel is a single
+            # voxel and the tensor stays rank-1, although the output would record smooth_components=True.
+            print(f"Warning: sigma={sigma} is too small to integrate the structure tensor "
+                  f"(kernel radius 0); the second/third eigenvectors will be arbitrary. Use sigma >= 1/3.")
         self.volume = volume  # Initialize volume attribute
 
         # --- Auto-infer patch_size from the input Zarr's chunking if none given ---
@@ -834,9 +839,12 @@ def main():
     parser.add_argument('--structure-tensor-only', action='store_true',
                         help='Compute only the structure tensor, skip eigenanalysis')
     parser.add_argument('--sigma', type=float, default=2.0,
-                        help='Gaussian σ for structure-tensor smoothing')
-    parser.add_argument('--smooth-components', action='store_true',
-                        help='After computing Jxx…Jzz, apply a second Gaussian smoothing to each channel')
+                        help='Gaussian sigma: image smoothing before the gradients and, with '
+                             '--smooth-components (default), the integration smoothing of the tensor')
+    parser.add_argument('--smooth-components', action=argparse.BooleanOptionalAction, default=True,
+                        help='Integrate the structure tensor: after computing Jxx…Jzz, apply a second Gaussian '
+                             'smoothing (same sigma) to each channel. Without it the tensor is rank-1 and its '
+                             'second/third eigenvectors are arbitrary (default: on; --no-smooth-components to skip)')
     parser.add_argument('--volume', type=int, default=None,
                         help='Volume ID for fiber-volume masking')
     

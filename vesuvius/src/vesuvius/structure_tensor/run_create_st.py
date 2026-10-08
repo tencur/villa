@@ -152,8 +152,8 @@ def run_structure_tensor_part(args, part_id, gpu_id, shared_output_path):
     
     # Structure tensor specific arguments
     cmd.extend(['--sigma', str(args.sigma)])
-    if args.smooth_components:
-        cmd.append('--smooth-components')
+    # create_st now integrates by default too; pass the choice explicitly either way.
+    cmd.append('--smooth-components' if args.smooth_components else '--no-smooth-components')
     if args.structure_tensor_only:
         cmd.append('--structure-tensor-only')
     if args.volume is not None:
@@ -267,11 +267,14 @@ def parse_arguments():
     
     # Structure tensor computation arguments
     parser.add_argument('--sigma', type=float, default=2.0,
-                        help='Gaussian sigma for structure-tensor smoothing')
+                        help='Gaussian sigma: image smoothing before the gradients and, with '
+                             '--smooth-components (default), the integration smoothing of the tensor')
     parser.add_argument('--structure-tensor-only', action='store_true',
                         help='Compute only the structure tensor, skip eigenanalysis')
-    parser.add_argument('--smooth-components', action='store_true',
-                        help='After computing Jxx...Jzz, apply a second Gaussian smoothing to each channel')
+    parser.add_argument('--smooth-components', action=argparse.BooleanOptionalAction, default=True,
+                        help='Integrate the tensor: Gaussian-smooth each of Jxx...Jzz after the outer product '
+                             '(default on). Without it every voxel holds the rank-1 tensor g g^T, so '
+                             'first_component/second_component are arbitrary and confidence saturates')
     parser.add_argument('--volume', type=int, default=None,
                         help='Volume ID for fiber-volume masking')
     
