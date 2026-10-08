@@ -1208,6 +1208,14 @@ class Inferer():
         else:
             print(f"Part {self.part_id} has no patches; wrote empty output stores and skipped inference.")
 
+        # Tell blend_logits that every patch of this part has been written. Until this is
+        # set, a listing of the store's chunks is a snapshot of a run still in progress.
+        if (
+            self.num_total_patches == 0
+            or self.current_patch_write_index == self.num_active_patches
+        ):
+            self.output_store.attrs['inference_complete'] = True
+
         if self.verbose: print("Inference complete.")
 
     def infer(self):

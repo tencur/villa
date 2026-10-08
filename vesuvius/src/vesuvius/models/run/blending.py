@@ -106,34 +106,49 @@ class SpatialPatchGrid:
         return non_empty_mask
 
     def _load_or_compute_non_empty(self, logits_path):
-        """Load or compute non-empty patch mask."""
+        """Load or compute non-empty patch mask.
+
+        The mask is a listing of the chunk files present, cached inside the logits store.
+        It is only cached for a part that vesuvius.predict has marked complete: a listing
+        taken while inference is still writing would otherwise be reused by every later
+        blend, which would then leave out all patches written after it.
+        """
         cache_path = os.path.join(logits_path, '.non_empty_patch_idxs.json')
-
-        # Try to load from cache
-        try:
-            if logits_path.startswith('s3://'):
-                with fsspec.open(cache_path, 'r', anon=False) as f:
-                    data = json.load(f)
-            else:
-                if os.path.exists(cache_path):
-                    with open(cache_path, 'r') as f:
-                        data = json.load(f)
-                else:
-                    data = None
-
-            if data:
-                non_empty_mask = np.zeros(data['num_patches'], dtype=bool)
-                non_empty_mask[data['non_empty_indices']] = True
-                return non_empty_mask
-        except Exception as e:
-            warnings.warn(f"Failed to load non-empty cache from {cache_path}: {e}")
-
-        # Compute it
         logits_store = open_zarr(logits_path, mode='r',
                                 storage_options={'anon': False} if logits_path.startswith('s3://') else None)
         total_patches = logits_store.shape[0]
+        part_complete = bool(logits_store.attrs.get('inference_complete', False))
 
+        if part_complete:
+            # Try to load from cache
+            try:
+                if logits_path.startswith('s3://'):
+                    with fsspec.open(cache_path, 'r', anon=False) as f:
+                        data = json.load(f)
+                else:
+                    if os.path.exists(cache_path):
+                        with open(cache_path, 'r') as f:
+                            data = json.load(f)
+                    else:
+                        data = None
+
+                if data:
+                    non_empty_mask = np.zeros(data['num_patches'], dtype=bool)
+                    non_empty_mask[data['non_empty_indices']] = True
+                    return non_empty_mask
+            except Exception as e:
+                warnings.warn(f"Failed to load non-empty cache from {cache_path}: {e}")
+        else:
+            warnings.warn(
+                f"{logits_path} is not marked complete by vesuvius.predict (inference still "
+                "running or failed, or written by an older version); listing its patches "
+                "without caching the result."
+            )
+
+        # Compute it
         non_empty_mask = self._compute_non_empty_from_chunks(logits_path, total_patches)
+        if not part_complete:
+            return non_empty_mask
 
         # Save as compact index list
         try:
