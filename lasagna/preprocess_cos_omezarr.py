@@ -935,7 +935,8 @@ def _compute_pred_dt_slab(
 		gpu_results = []
 		cp.cuda.get_current_stream().wait_event(h2d_evt)
 		for m_gpu in gpu_binaries:
-			outer_dt = cnd.distance_transform_edt(~m_gpu)
+			# m_gpu is the reader's uint8 0/1 mask; ~m_gpu would be a bitwise NOT (255/254, never 0)
+			outer_dt = cnd.distance_transform_edt(m_gpu == 0)
 			inner_dt = cnd.distance_transform_edt(m_gpu)
 			outer_enc = (128 - cp.clip(cp.round(outer_dt), 1, _MAX_DT)).astype(cp.uint8)
 			inner_enc = (127 + cp.clip(cp.round(inner_dt), 1, _MAX_DT)).astype(cp.uint8)
