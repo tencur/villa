@@ -582,7 +582,7 @@ void CPointCollectionWidget::clearTreeModel()
         _tree_view->selectionModel()->setCurrentIndex(QModelIndex(), QItemSelectionModel::NoUpdate);
     }
 
-    const QSignalBlocker modelBlocker(_model);
+    // Not blocked: the tree view must see the reset, or it keeps the deleted items.
     _model->clear();
     _model->setHorizontalHeaderLabels({"Name", "Points", "Winding", "Error", "Position"});
 }

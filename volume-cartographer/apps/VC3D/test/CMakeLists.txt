@@ -720,3 +720,21 @@ target_link_libraries(test_fiber_3d_canvas PRIVATE Qt6::Core Qt6::Gui Qt6::Widge
 add_test(NAME fiber_3d_canvas COMMAND test_fiber_3d_canvas)
 vc_register_test_target(test_fiber_3d_canvas)
 vc_register_ctest(fiber_3d_canvas test_fiber_3d_canvas)
+
+add_executable(test_point_collection_clear_all
+    test_point_collection_clear_all.cpp
+    ${PROJECT_SOURCE_DIR}/apps/VC3D/CPointCollectionWidget.cpp
+    ${PROJECT_SOURCE_DIR}/apps/VC3D/Keybinds.cpp
+    ${PROJECT_SOURCE_DIR}/core/src/VCCollection.cpp
+    ${PROJECT_SOURCE_DIR}/core/include/vc/ui/VCCollection.hpp)
+set_target_properties(test_point_collection_clear_all PROPERTIES
+    AUTOMOC ON AUTOUIC OFF AUTORCC OFF)
+target_include_directories(test_point_collection_clear_all PRIVATE
+    ${PROJECT_SOURCE_DIR}/apps/VC3D)
+target_link_libraries(test_point_collection_clear_all PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Test vc_core)
+add_test(NAME point_collection_clear_all COMMAND test_point_collection_clear_all)
+vc_register_test_target(test_point_collection_clear_all)
+vc_register_ctest(point_collection_clear_all test_point_collection_clear_all)
+set_tests_properties(point_collection_clear_all PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 60)
